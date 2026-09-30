@@ -56,7 +56,8 @@ public struct VehicleLocation: Codable, Sendable, Equatable {
     public var isValid: Bool { latitude != 0 && longitude != 0 }
 }
 
-public struct RawTelemetry: Decodable {
+/// 全部是值类型字段（String/Int/Double/Bool），天然可安全跨并发域传递。
+public struct RawTelemetry: Decodable, Sendable {
     public let pkeCode: String?
     public let motorName: String?
     public let voltage: Int?          // 132  → 13.2 V
