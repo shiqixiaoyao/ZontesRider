@@ -1,0 +1,13 @@
+# Xcode 构建产物
+build/
+DerivedData/
+*.xcodeproj
+xcuserdata/
+*.xcuserstate
+
+# 逆向工作区（含样本包与账号信息，永不上传）
+_reverse/
+
+# 其他
+.DS_Store
+*.ipa

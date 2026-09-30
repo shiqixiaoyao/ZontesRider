@@ -1,0 +1,35 @@
+name: ZontesRider
+options:
+  bundleIdPrefix: com.shiqixiaoyao
+targets:
+  ZontesRider:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ZontesRider
+        excludes:
+          - "Info.plist"
+    info:
+      path: ZontesRider/Info.plist
+      properties:
+        CFBundleDisplayName: 升仕车机
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - bluetooth-central
+        NSBluetoothAlwaysUsageDescription: 需要蓝牙连接升仕车机，用于读取车况数据与执行控车指令
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shiqixiaoyao.zontesrider
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
