@@ -338,16 +338,17 @@ private struct TrackPlot: View {
             guard let box = Self.box(of: valid), valid.count >= 2 else { return }
 
             // 背景网格（工业图纸感）
+            guard size.width.isFinite, size.height.isFinite else { return }
             var grid = Path()
-            let step: CGFloat = 24
+            let step: CGFloat = max(24, 1)
             var x: CGFloat = 0
-            while x < size.width {
+            while x < size.width, x < 8192 {
                 grid.move(to: CGPoint(x: x, y: 0))
                 grid.addLine(to: CGPoint(x: x, y: size.height))
                 x += step
             }
             var y: CGFloat = 0
-            while y < size.height {
+            while y < size.height, y < 8192 {
                 grid.move(to: CGPoint(x: 0, y: y))
                 grid.addLine(to: CGPoint(x: size.width, y: y))
                 y += step

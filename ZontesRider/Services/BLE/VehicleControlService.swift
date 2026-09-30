@@ -85,6 +85,11 @@ public struct BLEGateway: ControlCommandSending, Sendable {
 
 /// @MainActor 可观察对象：把 actor 的事件流投影成 UI 状态。
 /// 仪表盘靠它显示「车机蓝牙：已连接 / 扫描中 / 未连接」，并驱动控车按钮。
+///
+/// ⚠️ 惰性建链（v0.3.1）：**init 里绝不创建 CBCentralManager**。
+/// 上一版在 RootView 的 @State 默认值里就 new 了 VehicleControlService，
+/// 等于 App 冷启动第一帧就去初始化 CoreBluetooth（权限弹窗 / 蓝牙栈就绪竞争），
+/// 真机上表现为「点开即闪退」。现在只有用户主动点「连接车机」或发指令时才建栈。
 @Observable
 @MainActor
 public final class BLESession {
@@ -93,31 +98,45 @@ public final class BLESession {
     public private(set) var lastReport: String?
     public private(set) var lastError: String?
 
-    private var service: VehicleControlService
+    private var pke: String
+    private var service: VehicleControlService?
     private var eventTask: Task<Void, Never>?
     private var reportTask: Task<Void, Never>?
 
     public init(pkeCode: String) {
-        service = VehicleControlService(pkeCode: pkeCode)
-        attach()
+        pke = pkeCode
     }
 
-    public var pkeCode: String { service.pkeCode }
+    public var pkeCode: String { pke }
     public var isReady: Bool { linkState == .ready }
 
-    /// 换车：重建指令通道（pkeCode 会编进每一帧）
+    /// 换车：丢弃旧通道（pkeCode 会编进每一帧），下次用到时按新 pke 重建
     public func reconfigure(pkeCode: String) {
-        guard !pkeCode.isEmpty, pkeCode != service.pkeCode else { return }
-        eventTask?.cancel()
-        reportTask?.cancel()
-        service = VehicleControlService(pkeCode: pkeCode)
+        guard !pkeCode.isEmpty, pkeCode != pke else { return }
+        teardown()
+        pke = pkeCode
         linkState = .idle
         lastError = nil
-        attach()
     }
 
-    private func attach() {
-        let svc = service
+    /// 惰性取服务：第一次调用才真正初始化 CoreBluetooth
+    private func ensureService() -> VehicleControlService {
+        if let s = service { return s }
+        let s = VehicleControlService(pkeCode: pke)
+        service = s
+        attach(s)
+        return s
+    }
+
+    private func teardown() {
+        eventTask?.cancel(); eventTask = nil
+        reportTask?.cancel(); reportTask = nil
+        let old = service
+        service = nil
+        Task.detached { await old?.disconnect() }
+    }
+
+    private func attach(_ svc: VehicleControlService) {
         eventTask = Task { [weak self] in
             for await event in svc.transport.events {
                 guard let self else { return }
@@ -148,8 +167,9 @@ public final class BLESession {
     // MARK: 动作
 
     public func connect() async throws {
+        let svc = ensureService()
         do {
-            try await service.prepare()
+            try await svc.prepare()
             lastError = nil
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -158,8 +178,9 @@ public final class BLESession {
     }
 
     public func send(_ action: ControlAction) async throws {
+        let svc = ensureService()
         do {
-            try await service.send(action)
+            try await svc.send(action)
             lastError = nil
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -168,7 +189,8 @@ public final class BLESession {
     }
 
     public func disconnect() async {
-        await service.disconnect()
+        guard let svc = service else { return }
+        await svc.disconnect()
     }
 
     // MARK: 文案

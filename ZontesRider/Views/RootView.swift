@@ -69,7 +69,9 @@ public struct RootView: View {
             SovietTabBar(selection: $selection)
         }
         .tint(SovietPalette.brass)
+        .onAppear { LaunchTrace.mark("root.appear") }
         .task {
+            LaunchTrace.mark("root.task")
             ble.reconfigure(pkeCode: auth.activePKECode ?? "")
         }
         .onChange(of: auth.activePKECode) { _, newValue in

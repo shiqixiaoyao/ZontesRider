@@ -176,6 +176,7 @@ public struct DashboardView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            LaunchTrace.mark("dashboard.appear")
             if let ble { viewModel.attach(sender: BLEGateway(session: ble)) }
             viewModel.startPolling()
         }
