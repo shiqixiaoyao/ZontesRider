@@ -22,64 +22,64 @@ enum CBEvent: Sendable {
 }
 
 final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
-    let handler: @Sendable (CBEvent) -> Void
+    /// 两段式装配：actor init 时先建 proxy 供 CBCentralManager 使用，
+    /// 全部存储属性就位后再回填 handler（闭包要 weak 捕获 self，不能提前引用）。
+    var handler: (@Sendable (CBEvent) -> Void)?
 
-    init(handler: @escaping @Sendable (CBEvent) -> Void) {
-        self.handler = handler
-    }
+    override init() {}
 
     // MARK: Central
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
-        case .poweredOn:      handler(.poweredOn)
-        case .poweredOff:     handler(.poweredOff)
-        case .unauthorized:   handler(.unauthorized)
+        case .poweredOn:      handler?(.poweredOn)
+        case .poweredOff:     handler?(.poweredOff)
+        case .unauthorized:   handler?(.unauthorized)
         default:              break
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        handler(.discovered(peripheral))
+        handler?(.discovered(peripheral))
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        handler(.connected)
+        handler?(.connected)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        handler(.connectFailed(error?.localizedDescription ?? "未知原因"))
+        handler?(.connectFailed(error?.localizedDescription ?? "未知原因"))
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        handler(.disconnected(error?.localizedDescription))
+        handler?(.disconnected(error?.localizedDescription))
     }
 
     // MARK: Peripheral
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        handler(.servicesDiscovered(error?.localizedDescription))
+        handler?(.servicesDiscovered(error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        handler(.characteristicsDiscovered(service, error?.localizedDescription))
+        handler?(.characteristicsDiscovered(service, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler(.valueReceived(characteristic))
+        handler?(.valueReceived(characteristic))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler(.valueWritten(characteristic, error?.localizedDescription))
+        handler?(.valueWritten(characteristic, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        handler(.notificationStateChanged(characteristic, error?.localizedDescription))
+        handler?(.notificationStateChanged(characteristic, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
-        handler(.rssi(RSSI.intValue))
+        handler?(.rssi(RSSI.intValue))
     }
 }
 
@@ -133,13 +133,16 @@ public actor BLETransport: TransportProtocol {
         events = AsyncStream { cont = $0 }
         streamContinuation = cont
 
-        proxy = BLEDelegateProxy { [weak self] event in
-            Task { await self?.handle(event) }
-        }
+        let p = BLEDelegateProxy()
+        proxy = p
         let queue = DispatchQueue(label: "com.shiqixiaoyao.zontesrider.ble", qos: .userInitiated)
-        central = CBCentralManager(delegate: proxy, queue: queue, options: [
+        central = CBCentralManager(delegate: p, queue: queue, options: [
             CBCentralManagerOptionShowPowerAlertKey: true,
         ])
+        // 全部存储属性就位后再回填 handler（weak self 此时才合法）
+        p.handler = { [weak self] event in
+            Task { await self?.handle(event) }
+        }
     }
 
     deinit {
