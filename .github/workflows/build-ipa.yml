@@ -259,11 +259,11 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               IPHONEOS_DEPLOYMENT_TARGET=17.0 \
               ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
-              build 2>&1 | tee "build-$T.log" | tail -25
+              build 2>&1 | tee "build-$T.log" | tail -40
             # 编译失败时把真正的 error 行抓出来（tail 会把 error 淹没在 warning 之后）
             if [ ${PIPESTATUS[0]} -ne 0 ]; then
               echo "════ 编译错误详情 $T ════"
-              grep -E "error:|\.swift:[0-9]+:[0-9]+: error" "build-$T.log" | head -40
+              grep -nE "error|\.swift:[0-9]+:[0-9]+" "build-$T.log" | grep -viE "warning|##\[error\]|following build commands|CompileSwift|Building project|SwiftDriver" | head -60
               exit ${PIPESTATUS[0]}
             fi
           done
