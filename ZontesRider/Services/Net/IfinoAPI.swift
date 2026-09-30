@@ -50,6 +50,12 @@ private struct Envelope<T: Decodable>: Decodable {
     let data: T?
 }
 
+/// 轨迹按天切窗的单窗口结果（失败不抛，留给调用方决定怎么处理）
+private struct ChunkResult: Sendable {
+    let points: [TrackPoint]
+    let error: String?
+}
+
 // MARK: DTO · 登录
 
 public struct TokenPayload: Decodable, Sendable {
@@ -192,25 +198,104 @@ public actor IfinoAPIClient {
     }
 
     // MARK: 历史轨迹（实测 2026-09-30 打通）
+    //
+    // ⚠️ 端点性能实测：
+    //     今日   555 点 /  4.1s /  0.27 MB
+    //     近 7 日 6597 点 / 64.1s /  3.18 MB
+    //     近 30 日 25861 点 / 258.2s / 12.42 MB
+    //   App 单请求超时 25s → 7 日、30 日**必然失败**（这就是"轨迹界面没接入"的真因）。
+    //   因此这里按「1 天 1 个请求」切窗、4 路并发，并把每批结果即时回传给 UI，
+    //   折线逐段长出，而不是空白等一分钟。
 
-    /// GET /pkeapp/hbaseLocation/selectByCarCodeHbase/<carCode>?startTime=<yyyy-MM-dd HH:mm:ss>&endTime=<...>
-    /// 返回 HBase 里的轨迹点：经纬度 / 时间 / 车速 / 里程 / 电压 / 锁状态
+    /// 把时间窗切成按天的子窗口
+    static func dayChunks(from start: Date, to end: Date) -> [(Date, Date)] {
+        guard end > start else { return [(start, end)] }
+        var out: [(Date, Date)] = []
+        var cursor = start
+        // 上限兜底，杜绝任何情况下的死循环
+        var guardCount = 0
+        while cursor < end, guardCount < 400 {
+            guardCount += 1
+            let next = Calendar.current.date(byAdding: .day, value: 1, to: cursor) ?? end
+            if next <= cursor { break }
+            out.append((cursor, min(next, end)))
+            cursor = next
+        }
+        return out.isEmpty ? [(start, end)] : out
+    }
+
     public func getTrack(carCode: String,
                          startTime: Date,
                          endTime: Date,
-                         token: String) async throws -> [TrackPoint] {
+                         token: String,
+                         onProgress: (@Sendable (_ points: [TrackPoint], _ doneChunks: Int) -> Void)? = nil) async throws -> [TrackPoint] {
         guard !carCode.isEmpty else { throw IfinoError.noVehicle }
+        let chunks = Self.dayChunks(from: startTime, to: endTime)
+
+        var collected: [TrackPoint] = []
+        var failures: [String] = []
+        let width = 4
+        var index = 0
+        while index < chunks.count {
+            if Task.isCancelled { throw CancellationError() }
+            let batch = Array(chunks[index..<min(index + width, chunks.count)])
+            // 单个窗口失败（超时等）不能拖垮整页：先收下能拿到的，最后再决定是否报错
+            let parts = await withTaskGroup(of: ChunkResult.self) { group -> [ChunkResult] in
+                for (s, e) in batch {
+                    group.addTask { [self] in
+                        do {
+                            let pts = try await self.fetchTrackChunk(
+                                carCode: carCode, start: s, end: e, token: token
+                            )
+                            return ChunkResult(points: pts, error: nil)
+                        } catch is CancellationError {
+                            return ChunkResult(points: [], error: nil)
+                        } catch {
+                            let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                            return ChunkResult(points: [], error: msg)
+                        }
+                    }
+                }
+                var acc: [ChunkResult] = []
+                for await part in group { acc.append(part) }
+                return acc
+            }
+            for part in parts {
+                collected.append(contentsOf: part.points)
+                if let e = part.error { failures.append(e) }
+            }
+            if Task.isCancelled { throw CancellationError() }
+            // 边拉边回传：UI 可以把已到手的段落先画出来
+            onProgress?(collected, min(index + batch.count, chunks.count))
+            index += width
+        }
+
+        // 一个点都没拿到，且确实出过错 → 如实抛出第一个错误
+        if collected.isEmpty, let first = failures.first {
+            throw IfinoError.network(first)
+        }
+
+        // 排序 + 按 id 去重（相邻窗口在边界秒会重复同一点）
+        let sorted = collected.sorted {
+            ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast)
+        }
+        var seen = Set<String>()
+        return sorted.filter { seen.insert($0.id).inserted }
+    }
+
+    private func fetchTrackChunk(carCode: String, start: Date, end: Date,
+                                 token: String) async throws -> [TrackPoint] {
         let fmt = Self.backendFormatter
         var comps = URLComponents(
             string: Self.baseURL + "/pkeapp/hbaseLocation/selectByCarCodeHbase/\(carCode)"
         )
         comps?.queryItems = [
-            URLQueryItem(name: "startTime", value: fmt.string(from: startTime)),
-            URLQueryItem(name: "endTime", value: fmt.string(from: endTime)),
+            URLQueryItem(name: "startTime", value: fmt.string(from: start)),
+            URLQueryItem(name: "endTime", value: fmt.string(from: end)),
         ]
         guard let url = comps?.url else { throw IfinoError.badURL }
-        let points: [TrackPoint] = try await perform(url: url, method: "GET", form: nil, token: token)
-        return points
+        return try await perform(url: url, method: "GET", form: nil,
+                                 token: token, timeout: 90)
     }
 
     // MARK: - 内部
@@ -224,8 +309,9 @@ public actor IfinoAPIClient {
 
     private func perform<T: Decodable>(url: URL, method: String,
                                        form: [(String, String)]?,
-                                       token: String?) async throws -> T {
-        var req = URLRequest(url: url, timeoutInterval: 25)
+                                       token: String?,
+                                       timeout: TimeInterval = 25) async throws -> T {
+        var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         req.setValue("okhttp/4.9.3", forHTTPHeaderField: "User-Agent")
@@ -242,6 +328,9 @@ public actor IfinoAPIClient {
         let (data, resp): (Data, URLResponse)
         do {
             (data, resp) = try await session.data(for: req)
+        } catch let e as URLError where e.code == .cancelled {
+            // 切页 / 切档位导致的取消：向上抛 CancellationError，UI 不当成错误显示
+            throw CancellationError()
         } catch {
             throw IfinoError.network(error.localizedDescription)
         }

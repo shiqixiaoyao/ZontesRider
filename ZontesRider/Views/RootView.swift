@@ -44,9 +44,11 @@ public struct RootView: View {
     /// 全局唯一蓝牙会话：控车指令经它下发给车机（pkeCode 随选中车辆重建）
     /// 惰性：init 不碰 CoreBluetooth，只有用户点「连接车机」才建栈
     @State private var ble = BLESession(pkeCode: "")
-    /// 安全模式：上次启动没跑满 6 秒（说明进程被杀了）就降级启动——
-    /// 只挂演示仪表盘，不装配蓝牙会话，先把界面撑起来让用户能进来看诊断。
-    @State private var safeMode = !LaunchTrace.lastLaunchSurvived
+    /// 安全模式：**只有真的留下了异常记录**（NSSetUncaughtExceptionHandler 落盘的 last-crash.txt）
+    /// 才降级启动——不挂蓝牙会话，先把界面撑起来让用户能进「我的」看诊断。
+    /// 注意不要用「上次没跑到 stable」作为判据：首次安装、以及用户主动杀进程都会命中，
+    /// 会造成「第一次打开就被判为异常」的误伤。
+    @State private var safeMode = LaunchTrace.crash != nil
 
     // BLESession 是 MainActor 隔离类型，init 必须在主线程上下文求值
     @MainActor public init() {}
@@ -74,7 +76,12 @@ public struct RootView: View {
         }
         .tint(SovietPalette.brass)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if safeMode { SafeModeBanner { safeMode = false } }
+            if safeMode {
+                SafeModeBanner {
+                    LaunchTrace.clearCrash()
+                    safeMode = false
+                }
+            }
         }
         .onAppear { LaunchTrace.mark("root.appear") }
         .task {
@@ -91,8 +98,9 @@ public struct RootView: View {
 
 // MARK: - 安全模式提示条
 
-/// 上次启动没跑到 stable 时出现在顶部。
-/// 点「恢复正常」才装配蓝牙会话——这样即使某处仍有问题，用户至少能进 App 看诊断。
+/// 上次启动留下了异常记录时出现在顶部。
+/// 点「恢复正常」会清掉异常记录并装配蓝牙会话——这样即使某处仍有问题，
+/// 用户至少能进 App 看诊断。
 private struct SafeModeBanner: View {
     let restore: () -> Void
 
@@ -100,7 +108,7 @@ private struct SafeModeBanner: View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 12))
-            Text("安全模式：上次启动异常，已停用蓝牙会话")
+            Text("安全模式：上次启动异常，蓝牙会话已停用（诊断见「我的」）")
                 .font(.soviet(10))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)

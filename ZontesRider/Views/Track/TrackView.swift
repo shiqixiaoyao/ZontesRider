@@ -18,6 +18,9 @@ public final class TrackViewModel {
     public var isLoading = false
     public var errorText: String?
     public var loadedAt: Date?
+    /// 已完成的按天窗口数 / 总窗口数（进度条用）
+    public var doneChunks = 0
+    public var totalChunks = 0
 
     public init() {}
 
@@ -29,13 +32,27 @@ public final class TrackViewModel {
             return
         }
         isLoading = true
+        doneChunks = 0
+        let (start, end) = range.window()
+        totalChunks = IfinoAPIClient.dayChunks(from: start, to: end).count
         defer { isLoading = false }
         do {
-            let pts = try await auth.fetchTrack(range: range)
+            // 每批回传：折线逐段长出，而不是空白等一分钟
+            let pts = try await auth.fetchTrack(range: range) { [weak self] partial, done in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.points = partial
+                    self.stats = TrackStats(points: partial)
+                    self.doneChunks = done
+                }
+            }
             points = pts
             stats = TrackStats(points: pts)
+            doneChunks = totalChunks
             errorText = nil
             loadedAt = Date()
+        } catch is CancellationError {
+            // 切页/切档位导致的取消，不算错误
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -69,9 +86,10 @@ public struct TrackView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .task { await viewModel.load(using: auth) }
-        .onChange(of: viewModel.range) { _, _ in
-            Task { await viewModel.load(using: auth) }
+        // 档位切换或登录态变化都重新拉取；task(id:) 会自动取消上一轮，
+        // 避免「今日→近30日」连点时两个 30 天请求互相打满
+        .task(id: "\(viewModel.range.rawValue)|\(auth.isLoggedIn)") {
+            await viewModel.load(using: auth)
         }
     }
 
@@ -143,12 +161,33 @@ public struct TrackView: View {
                 SovietSectionLabel("行驶轨迹")
                 Spacer()
                 if viewModel.isLoading {
-                    ProgressView().controlSize(.small).tint(SovietPalette.brass)
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small).tint(SovietPalette.brass)
+                        Text("拉取中 \(viewModel.doneChunks)/\(max(viewModel.totalChunks, 1)) 天 · 已 \(viewModel.points.count) 点")
+                            .font(.soviet(10))
+                            .foregroundStyle(SovietPalette.brass)
+                            .monospacedDigit()
+                    }
                 } else {
                     Text("\(viewModel.points.count) 个轨迹点")
                         .font(.soviet(10))
                         .foregroundStyle(SovietPalette.textFaint)
                 }
+            }
+
+            // 按天窗口的进度条：让「慢」变得可见，而不是像卡死
+            if viewModel.isLoading, viewModel.totalChunks > 0 {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(SovietPalette.steel)
+                        Rectangle()
+                            .fill(SovietPalette.brass)
+                            .frame(width: geo.size.width
+                                   * CGFloat(min(viewModel.doneChunks, viewModel.totalChunks))
+                                   / CGFloat(viewModel.totalChunks))
+                    }
+                }
+                .frame(height: 3)
             }
 
             TrackPlot(points: viewModel.points)
@@ -334,7 +373,8 @@ private struct TrackPlot: View {
 
     var body: some View {
         Canvas { context, size in
-            let valid = points.filter { $0.isValid }
+            // 30 天有 2.5 万点，直接描边会掉帧；抽稀到 ~1500 点，肉眼无差
+            let valid = Self.decimate(points.filter { $0.isValid })
             guard let box = Self.box(of: valid), valid.count >= 2 else { return }
 
             // 背景网格（工业图纸感）
@@ -387,6 +427,22 @@ private struct TrackPlot: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    /// 等距抽稀：保留首尾，中间按步长取样
+    private static func decimate(_ pts: [TrackPoint], target: Int = 1500) -> [TrackPoint] {
+        guard pts.count > target, target > 1 else { return pts }
+        let step = Double(pts.count) / Double(target)
+        guard step > 1 else { return pts }
+        var out: [TrackPoint] = []
+        out.reserveCapacity(target + 1)
+        var cursor = 0.0
+        while Int(cursor) < pts.count {
+            out.append(pts[Int(cursor)])
+            cursor += step
+        }
+        if let last = pts.last, out.last?.id != last.id { out.append(last) }
+        return out
     }
 
     private static func box(of pts: [TrackPoint]) -> Box? {

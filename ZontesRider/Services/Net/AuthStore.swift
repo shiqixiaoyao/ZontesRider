@@ -188,12 +188,16 @@ public final class AuthStore {
 
     // MARK: 历史轨迹
 
-    public func fetchTrack(range: TrackRange) async throws -> [TrackPoint] {
+    /// 按天切窗并发拉取；`onProgress` 每批回传一次已到手的全部点位，
+    /// 让折线在 UI 上逐段长出（7 天约 10~15s，30 天约 60~70s）。
+    public func fetchTrack(range: TrackRange,
+                           onProgress: (@Sendable (_ points: [TrackPoint], _ doneChunks: Int) -> Void)? = nil) async throws -> [TrackPoint] {
         guard let token, let pke = activePKECode else { throw IfinoError.unauthorized }
         let (start, end) = range.window()
         do {
             let pts = try await client.getTrack(carCode: pke, startTime: start,
-                                                endTime: end, token: token)
+                                                endTime: end, token: token,
+                                                onProgress: onProgress)
             health.lastSuccessAt = Date()
             health.lastError = nil
             health.ok = true

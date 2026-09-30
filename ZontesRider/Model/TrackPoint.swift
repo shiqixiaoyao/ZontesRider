@@ -13,7 +13,7 @@ public struct TrackPoint: Decodable, Sendable, Equatable, Identifiable {
     public let latitude: Double
     public let longitude: Double
     public let speed: Double?        // km/h
-    public let odometer: Double?     // km（服务端原始值）
+    public let odometer: Double?     // km（已由服务端 0.1km 口径换算）
     public let voltage: Double?      // 131 → 13.1V
     public let isLocked: Bool?
     public let timestamp: Date?
@@ -46,7 +46,9 @@ public struct TrackPoint: Decodable, Sendable, Equatable, Identifiable {
         latitude  = dbl([.latitude]) ?? 0
         longitude = dbl([.longitude]) ?? 0
         speed     = dbl([.speed])
-        odometer  = dbl([.odomileages, .oDOMileages, .ODOMileages])
+        // ⚠️ 2026-09-30 实测：轨迹接口的 odomileages 量纲是 **0.1 km**
+        //    （轨迹 12760 对应车况接口 1275.0 km），不 ÷10 会让「里程表增量」放大 10 倍
+        odometer  = dbl([.odomileages, .oDOMileages, .ODOMileages]).map { $0 / 10 }
         voltage   = dbl([.voltage]).map { $0 / 10 }
         if let i = try? c.decode(Int.self, forKey: .lock) { isLocked = (i == 1) }
         else if let s = str([.lock]) { isLocked = (s == "1" || s == "true") }
