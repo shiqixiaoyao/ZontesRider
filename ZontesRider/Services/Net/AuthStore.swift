@@ -277,7 +277,7 @@ public final class AuthStore {
             health.lastError = e.errorDescription
             if case .unauthorized = e {
                 // 静默续期并重试一次，成功则本次请求照常返回（登录态不掉）
-                if await ensureFreshToken(), let nt = token, let np = activePKECode {
+                if await ensureFreshToken(), let nt = self.token, let np = activePKECode {
                     let t = try await client.getHomeData(pkeCode: np, token: nt)
                     health.lastSuccessAt = Date()
                     health.lastError = nil
@@ -318,7 +318,7 @@ public final class AuthStore {
             health.lastError = e.errorDescription
             if case .unauthorized = e {
                 // 静默续期并重试一次（轨迹可能已按天切窗并发，这里只重试整体）
-                if await ensureFreshToken(), let nt = token {
+                if await ensureFreshToken(), let nt = self.token {
                     let pts = try await client.getTrack(carCode: pke, startTime: start,
                                                         endTime: end, token: nt,
                                                         onProgress: onProgress)

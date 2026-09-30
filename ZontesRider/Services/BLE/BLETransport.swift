@@ -3,18 +3,27 @@ import CoreBluetooth
 
 // MARK: - CoreBluetooth → actor 事件桥
 
+/// 把 CBPeripheral 包一层 `@unchecked Sendable`：
+/// 所有 CBCentralManager/CBPeripheral 代理回调都发生在同一个专属串行队列上，
+/// 且 peripheral 对象在连接生命周期内由 CoreBluetooth 单线程管理，
+/// 跨并发域传递时不会发生并发访问 —— 用 @unchecked 标注是安全且业界通行的做法。
+final class PeripheralBox: @unchecked Sendable {
+    let value: CBPeripheral
+    init(_ p: CBPeripheral) { value = p }
+}
+
 /// 代理回调全部发生在专属串行队列，桥对象只做一件事：把事件原样抛进 actor。
 /// 桥自身不持有任何可变状态，天然无数据竞争。
 ///
-/// ⚠️ 这里**只允许携带值类型**（CBUUID / Data / String / Int）：
-///    CoreBluetooth 的 CBCharacteristic / CBService / CBPeripheral 都是非 Sendable 的
-///    ObjC 类，塞进 Sendable 枚举的关联值会被 Swift 6 语言模式判成 error。
-///    做法：在代理这一层就把需要的字段（uuid、value）取出来，再跨并发域传递。
+/// ⚠️ 这里**只允许携带值类型**（String / Data / Int）或 `@unchecked Sendable` 的箱子：
+///    CoreBluetooth 的 CBCharacteristic / CBService / CBPeripheral / CBUUID 都是非 Sendable 的
+///    ObjC 类，直接塞进 Sendable 枚举的关联值会被 Swift 6 语言模式判成 error。
+///    做法：在代理这一层就把需要的字段（uuidString、value）取出来，再跨并发域传递。
 enum CBEvent: Sendable {
     case poweredOn
     case poweredOff
     case unauthorized
-    case discovered(CBPeripheral)
+    case discovered(PeripheralBox)
     case connected
     case connectFailed(String)
     case disconnected(String?)
@@ -46,7 +55,7 @@ final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        handler?(.discovered(peripheral))
+        handler?(.discovered(PeripheralBox(peripheral)))
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -295,11 +304,11 @@ public actor BLETransport: TransportProtocol {
             failAllWaiters(TransportError.bluetoothUnauthorized)
             state = .failed("蓝牙权限被拒绝")
 
-        case .discovered(let p):
+        case .discovered(let box):
             central.stopScan()
             if let c = discoveredContinuation {
                 discoveredContinuation = nil
-                c.resume(returning: p)
+                c.resume(returning: box.value)
             }
 
         case .connected:
