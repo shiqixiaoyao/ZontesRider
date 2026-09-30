@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 我的工段（未登录 → 登录门岗；已登录 → 车辆档案）
 
@@ -278,9 +279,47 @@ private struct DiagnosticsCard: View {
     private var phase: String { LaunchTrace.phase ?? "（无记录）" }
     private var crash: String? { LaunchTrace.crash }
 
+    /// 装的是哪一版（XcodeGen 之前没把版本号写进 Info.plist，一直显示 SDK 默认的 1.0/1，
+    /// 出问题时根本分不清用户手里是哪个包）
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
+    }
+
+    /// 机型与系统版本：闪退排查第一问就是「iOS 多少」
+    private var systemInfo: String {
+        "iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SovietSectionLabel("启动诊断")
+
+            HStack {
+                Text("App 版本")
+                    .font(.soviet(11))
+                    .foregroundStyle(SovietPalette.textMuted)
+                Spacer()
+                Text(appVersion)
+                    .font(.soviet(11))
+                    .monospacedDigit()
+                    .foregroundStyle(SovietPalette.brassPale)
+                    .lineLimit(1)
+            }
+
+            HStack {
+                Text("系统环境")
+                    .font(.soviet(11))
+                    .foregroundStyle(SovietPalette.textMuted)
+                Spacer()
+                Text(systemInfo)
+                    .font(.soviet(11))
+                    .monospacedDigit()
+                    .foregroundStyle(SovietPalette.brassPale)
+                    .lineLimit(1)
+            }
 
             HStack {
                 Text("上次止于")

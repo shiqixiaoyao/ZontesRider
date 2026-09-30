@@ -13,10 +13,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 抗闪退关键 2/2：钉住工具链。
+      # 之前用 latest-stable（当前 Xcode 26 / SDK iOS 26.2）编译，产物在人家 iOS 17/18
+      # 的真机上点开即闪退。Xcode 16.x（SDK iOS 18）编译出来的包在 iOS 17+ 上最稳，
+      # 也不会有新版 SDK 引入的运行期符号依赖。
       - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
+        run: |
+          echo "== 可用 Xcode =="
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          PICK=""
+          for v in 16.4 16.3 16.2 16.1 16.0 15.4; do
+            if [ -d "/Applications/Xcode_$v.app" ]; then PICK="/Applications/Xcode_$v.app"; break; fi
+          done
+          if [ -z "$PICK" ]; then
+            PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -v 'Xcode_26' | head -1 || true)"
+          fi
+          if [ -z "$PICK" ]; then
+            PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)"
+          fi
+          echo "选中: $PICK"
+          sudo xcode-select -s "$PICK/Contents/Developer"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -31,9 +48,26 @@ jobs:
             -scheme ZontesRider \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
             build
+
+      - name: Verify bundle
+        run: |
+          APP="build/DerivedData/Build/Products/Release-iphoneos/ZontesRider.app"
+          echo "== .app 内容 =="
+          ls -la "$APP"
+          echo "== 嵌入的 Swift 运行时 =="
+          ls -la "$APP/Frameworks" 2>/dev/null || echo "（没有 Frameworks 目录）"
+          echo "== 版本 / 最低系统 =="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist"
+          echo "== 二进制架构 =="
+          lipo -info "$APP/ZontesRider" 2>/dev/null || file "$APP/ZontesRider"
 
       - name: Package unsigned IPA
         run: |
