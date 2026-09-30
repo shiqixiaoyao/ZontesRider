@@ -203,14 +203,10 @@ public struct HazardStripes: View {
 
     public var body: some View {
         Canvas { context, size in
-            // 死循环防护：layout 若把 .infinity 传进来，裸 while 会跑满主线程
-            // （表现为「点开即闪退」，本质是看门狗杀进程）。这里三重设限。
-            guard size.width.isFinite, size.height.isFinite else { return }
-            let w = max(stripeWidth, 1)
-            let limit = min(size.width + size.height, 8192) / w + 8
+            let w = stripeWidth
             var x: CGFloat = -size.height
             var index = 0
-            while x < size.width + size.height, CGFloat(index) < limit {
+            while x < size.width + size.height {
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: size.height))
                 path.addLine(to: CGPoint(x: x + size.height, y: 0))

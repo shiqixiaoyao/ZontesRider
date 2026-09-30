@@ -114,7 +114,6 @@ public actor BLETransport: TransportProtocol {
     private var state: TransportState = .idle {
         didSet { streamContinuation.yield(.stateChanged(state)) }
     }
-    private var primeFrame: String?
     private var intentionalDisconnect = false
     private var reconnectTask: Task<Void, Never>?
     private var lastWriteAt: ContinuousClock.Instant = .now
@@ -151,9 +150,6 @@ public actor BLETransport: TransportProtocol {
     }
 
     // MARK: - TransportProtocol
-
-    /// 供 UI 轮询当前链路状态（只读，actor 内访问）
-    public var currentState: TransportState { state }
 
     public func connect() async throws {
         intentionalDisconnect = false
@@ -219,17 +215,6 @@ public actor BLETransport: TransportProtocol {
         }
 
         state = .ready
-
-        // 6. prime 帧（反编译 §2.1：就绪后先发 "*BT,<pke>,10,001,7#"，再 sleep 20ms）
-        if let pf = primeFrame, let data = pf.data(using: .ascii) {
-            try await write(data)
-            try? await Task.sleep(for: .seconds(BLETuning.primeSettleDelay))
-        }
-    }
-
-    /// 建链握手帧。控车服务在建链前写入（*BT,<pkeCode>,10,001,7#）
-    public func setPrimeFrame(_ frame: String?) {
-        primeFrame = frame
     }
 
     public func disconnect() async {
@@ -243,14 +228,7 @@ public actor BLETransport: TransportProtocol {
 
     /// 写一帧：180ms 节流（车机缓冲保护）+ withResponse + 900ms 超时
     public func send(_ data: Data) async throws {
-        guard state == .ready, peripheral != nil, writeChar != nil else {
-            throw TransportError.notReady
-        }
-        try await write(data)
-    }
-
-    private func write(_ data: Data) async throws {
-        guard let p = peripheral, let w = writeChar else {
+        guard state == .ready, let p = peripheral, let w = writeChar else {
             throw TransportError.notReady
         }
 

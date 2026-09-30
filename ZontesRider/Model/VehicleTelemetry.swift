@@ -1,68 +1,16 @@
 import Foundation
 
 // MARK: - 云端原始报文
-//
-// ⚠️ 2026-09-30 实测校准：getHomeData 的车况字段全部在 `data.myCarData` 内，
-// 且服务端字段名大小写混用（pkecode / pKECode、gsmrssi / gSMRSSI、odomileages / oDOMileages），
-// 这里把见过的形态全列上，服务端改版只改本结构，UI 层不动。
 
-/// getHomeData 的 data 层：车况在 myCarData，定位在 carLocation
-public struct HomeDataPayload: Decodable, Sendable {
-    public let myCarData: RawTelemetry?
-    public let carLocation: VehicleLocation?
-    public let freezingMode: String?
-    public let chaseMode: String?
-
-    enum CodingKeys: String, CodingKey {
-        case myCarData, MyCarData
-        case carLocation, CarLocation
-        case freezingMode, chaseMode
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        myCarData = (try? c.decode(RawTelemetry.self, forKey: .myCarData))
-            ?? (try? c.decode(RawTelemetry.self, forKey: .MyCarData))
-        carLocation = (try? c.decode(VehicleLocation.self, forKey: .carLocation))
-            ?? (try? c.decode(VehicleLocation.self, forKey: .CarLocation))
-        freezingMode = (try? c.decode(String.self, forKey: .freezingMode))
-        chaseMode = (try? c.decode(String.self, forKey: .chaseMode))
-    }
-}
-
-/// 车辆定位（data.carLocation）
-public struct VehicleLocation: Decodable, Sendable, Equatable {
-    public let latitude: Double
-    public let longitude: Double
-
-    enum CodingKeys: String, CodingKey { case latitude, longitude }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        func dbl(_ k: CodingKeys) -> Double? {
-            if let v = try? c.decode(Double.self, forKey: k) { return v }
-            if let s = try? c.decode(String.self, forKey: k), let v = Double(s) { return v }
-            return nil
-        }
-        latitude = dbl(.latitude) ?? 0
-        longitude = dbl(.longitude) ?? 0
-    }
-
-    public init(latitude: Double, longitude: Double) {
-        self.latitude = latitude
-        self.longitude = longitude
-    }
-
-    public var isValid: Bool { latitude != 0 && longitude != 0 }
-}
-
+/// getHomeData 返回的原始字段。
+/// ⚠️ 字段名按实测 JSON 校准过一轮，若服务端改版只改本结构，UI 层不动。
 public struct RawTelemetry: Decodable {
     public let pkeCode: String?
     public let motorName: String?
     public let voltage: Int?          // 132  → 13.2 V
     public let oil: Int?              // 33   → 33 %
     public let range: Int?            // 128  km
-    public let totalMileage: Double?  // 1275.0 km
+    public let totalMileage: Double?  // 1265.0 km
     public let speed: Double?         // 4000000 = 哨兵值，表示无效
     public let frontTire: Int?
     public let rearTire: Int?
@@ -73,9 +21,6 @@ public struct RawTelemetry: Decodable {
     public let lockState: Int?
     public let faultCode: String?
     public let changeTime: String?
-    public let freezingMode: String?
-    public let latitude: Double?
-    public let longitude: Double?
     public let isShowOilTankAndSeatCushion: Bool?
 
     /// 服务端在无有效数据时下发的哨兵值，UI 必须过滤，否则会显示成 400 万
@@ -88,7 +33,6 @@ public struct RawTelemetry: Decodable {
             for k in keys {
                 if let v = try? c.decode(Int.self, forKey: k) { return v }
                 if let s = try? c.decode(String.self, forKey: k), let v = Int(s) { return v }
-                if let d = try? c.decode(Double.self, forKey: k) { return Int(d) }
             }
             return nil
         }
@@ -104,48 +48,43 @@ public struct RawTelemetry: Decodable {
             return nil
         }
 
-        pkeCode     = str([.pkecode, .pKECode, .PKECode, .pkeCode, .carCode])
-        motorName   = str([.itemName, .motorTypeName, .motorName])
-        voltage     = int([.voltage, .Voltage])
-        oil         = int([.oil, .Oil, .oilPercent])
-        range       = int([.range, .Range])
-        totalMileage = dbl([.odomileages, .oDOMileages, .ODOMileages, .totalMileage])
-        speed       = dbl([.speed, .Speed])
-        frontTire   = int([.pressureFront, .pressurefront])
-        rearTire    = int([.pressureRear, .pressurerear])
-        frontTireRate = int([.ratedFrontPressure, .productsRatedFront, .frontRated])
-        rearTireRate  = int([.ratedRearPressure, .productsRatedRear, .rearRated])
-        satellite   = int([.satelliteNum, .satellite])
-        tboxSignal  = int([.gsmrssi, .gSMRSSI, .tboxSignal])
-        lockState   = int([.lock, .Lock, .lockState])
-        faultCode   = str([.faultCode, .FaultCode])
-        changeTime  = str([.changeTime, .ChangeTime])
-        freezingMode = str([.freezingMode, .FreezingMode])
-        latitude    = dbl([.latitude])
-        longitude   = dbl([.longitude])
+        pkeCode     = str([.pkeCode, .pkeCodeAlt])
+        motorName   = str([.motorName, .motorNameAlt])
+        voltage     = int([.voltage, .voltageAlt])
+        oil         = int([.oil, .oilAlt, .oilPercent])
+        range       = int([.range, .rangeAlt])
+        totalMileage = dbl([.totalMileage, .totalMileageAlt])
+        speed       = dbl([.speed, .speedAlt])
+        frontTire   = int([.frontTire, .frontTireAlt])
+        rearTire    = int([.rearTire, .rearTireAlt])
+        frontTireRate = int([.frontTireRate, .frontTireRateAlt])
+        rearTireRate  = int([.rearTireRate, .rearTireRateAlt])
+        satellite   = int([.satellite, .satelliteAlt])
+        tboxSignal  = int([.tboxSignal, .tboxSignalAlt])
+        lockState   = int([.lockState, .lockStateAlt])
+        faultCode   = str([.faultCode, .faultCodeAlt])
+        changeTime  = str([.changeTime, .changeTimeAlt])
         isShowOilTankAndSeatCushion = (try? c.decode(Bool.self, forKey: .isShowOilTankAndSeatCushion))
             ?? (str([.isShowOilTankAndSeatCushion, .tankFlag])?.boolValue)
     }
 
     enum CodingKeys: String, CodingKey {
-        case pkecode, pKECode, PKECode, pkeCode, carCode
-        case itemName, motorTypeName, motorName
-        case voltage, Voltage
-        case oil, Oil, oilPercent
-        case range, Range
-        case odomileages, oDOMileages, ODOMileages, totalMileage
-        case speed, Speed
-        case pressureFront, pressurefront
-        case pressureRear, pressurerear
-        case ratedFrontPressure, productsRatedFront, frontRated
-        case ratedRearPressure, productsRatedRear, rearRated
-        case satelliteNum, satellite
-        case gsmrssi, gSMRSSI, tboxSignal
-        case lock, Lock, lockState
-        case faultCode, FaultCode
-        case changeTime, ChangeTime
-        case freezingMode, FreezingMode
-        case latitude, longitude
+        case pkeCode, pkeCodeAlt = "PKECode"
+        case motorName, motorNameAlt = "motorTypeName"
+        case voltage, voltageAlt = "Voltage"
+        case oil, oilAlt = "Oil", oilPercent = "oilPercent"
+        case range, rangeAlt = "Range"
+        case totalMileage, totalMileageAlt = "odomileages"
+        case speed, speedAlt = "Speed"
+        case frontTire, frontTireAlt = "pressureFront"
+        case rearTire, rearTireAlt = "pressureRear"
+        case frontTireRate, frontTireRateAlt = "frontRated"
+        case rearTireRate, rearTireRateAlt = "rearRated"
+        case satellite, satelliteAlt = "satelliteNum"
+        case tboxSignal, tboxSignalAlt = "gsmrssi"
+        case lockState, lockStateAlt = "lock"
+        case faultCode, faultCodeAlt = "FaultCode"
+        case changeTime, changeTimeAlt = "ChangeTime"
         case isShowOilTankAndSeatCushion, tankFlag = "isShowOilTankAndSeatCushionFlag"
     }
 }
@@ -184,9 +123,7 @@ public struct VehicleTelemetry: Sendable, Equatable {
     public var lockState: LockState
     public var faultCodes: [String]
     public var supportsSeatAndTank: Bool
-    public var isFrozen: Bool
 
-    public var location: VehicleLocation?
     public var updatedAt: Date?
 
     public enum LockState: Int, Sendable {
@@ -223,8 +160,6 @@ public struct VehicleTelemetry: Sendable, Equatable {
         lockState: LockState = .unknown,
         faultCodes: [String] = [],
         supportsSeatAndTank: Bool = true,
-        isFrozen: Bool = false,
-        location: VehicleLocation? = nil,
         updatedAt: Date? = nil
     ) {
         self.pkeCode = pkeCode
@@ -244,13 +179,10 @@ public struct VehicleTelemetry: Sendable, Equatable {
         self.lockState = lockState
         self.faultCodes = faultCodes
         self.supportsSeatAndTank = supportsSeatAndTank
-        self.isFrozen = isFrozen
-        self.location = location
         self.updatedAt = updatedAt
     }
 
-    public init(raw: RawTelemetry, location: VehicleLocation? = nil) {
-        let loc = location ?? RawTelemetry.makeLocation(lat: raw.latitude, lon: raw.longitude)
+    public init(raw: RawTelemetry) {
         self.init(
             pkeCode: raw.pkeCode ?? "",
             displayName: raw.motorName ?? "升仕",
@@ -272,8 +204,6 @@ public struct VehicleTelemetry: Sendable, Equatable {
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty },
             supportsSeatAndTank: raw.isShowOilTankAndSeatCushion ?? false,
-            isFrozen: (raw.freezingMode ?? "") == "1",
-            location: loc,
             updatedAt: raw.changeTime.map { Self.parse($0) } ?? nil
         )
     }
@@ -303,11 +233,6 @@ public struct VehicleTelemetry: Sendable, Equatable {
         return min(max((v - 11.5) / (14.8 - 11.5), 0), 1)
     }
 
-    public var coordinateText: String? {
-        guard let l = location, l.isValid else { return nil }
-        return String(format: "%.5f, %.5f", l.latitude, l.longitude)
-    }
-
     private static func parse(_ s: String) -> Date? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -319,36 +244,27 @@ public struct VehicleTelemetry: Sendable, Equatable {
     }
 }
 
-private extension RawTelemetry {
-    static func makeLocation(lat: Double?, lon: Double?) -> VehicleLocation? {
-        guard let lat, let lon, lat != 0, lon != 0 else { return nil }
-        return VehicleLocation(latitude: lat, longitude: lon)
-    }
-}
-
 // MARK: - 预览样本（真实车况）
 
 public extension VehicleTelemetry {
     static let sample = VehicleTelemetry(
         pkeCode: "864918088644768",
-        displayName: "175V特黑（国Ⅳ）",
+        displayName: "升仕 175V",
         variant: "国Ⅳ · 2026 · 特黑",
         batteryVoltage: 13.2,
         fuelPercent: 33,
         rangeKm: 128,
-        odometerKm: 1275.0,
+        odometerKm: 1265.0,
         speedKmh: nil,
         frontTireKpa: 93,
-        rearTireKpa: 111,
+        rearTireKpa: 112,
         frontTireRated: 195,
         rearTireRated: 230,
-        satelliteCount: 29,
+        satelliteCount: 31,
         tboxSignal: 5,
-        lockState: .unlocked,
+        lockState: .armed,
         faultCodes: [],
         supportsSeatAndTank: true,
-        isFrozen: false,
-        location: VehicleLocation(latitude: 28.5545, longitude: 107.4508),
         updatedAt: Date()
     )
 }
