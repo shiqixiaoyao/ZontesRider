@@ -249,7 +249,8 @@ jobs:
             chmod +x "$SRC/$T"
             echo "── $T 二进制权限/签名 ──"
             stat -f "%Sp %N" "$SRC/$T"
-            otool -l "$SRC/$T" | grep -c LC_CODE_SIGNATURE
+            # grep -c 在匹配 0 行时返回 1，会误杀 set -e 的整个打包步骤，必须兜住
+            otool -l "$SRC/$T" | grep -c LC_CODE_SIGNATURE || echo "0（未签名，符合预期：留给自签工具重签）"
             rm -rf pkg && mkdir -p pkg/Payload
             cp -r "$SRC" pkg/Payload/
             (cd pkg && zip -r -q "../$T-unsigned.ipa" Payload)

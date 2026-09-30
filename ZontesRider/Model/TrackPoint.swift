@@ -96,11 +96,18 @@ public struct TrackStats: Sendable, Equatable {
         pointCount = valid.count
 
         var dist = 0.0
-        for i in 1..<valid.count {
-            dist += TrackStats.haversine(
-                lat1: valid[i - 1].latitude, lon1: valid[i - 1].longitude,
-                lat2: valid[i].latitude, lon2: valid[i].longitude
-            )
+        // ⚠️ 必须是 `valid.count > 1` 才进循环。
+        // 原写法 `for i in 1..<valid.count` 在 valid.count == 0 时构造出 `1..<0`，
+        // Swift 会直接 trap（"Range requires lowerBound <= upperBound"）→ EXC_BREAKPOINT/SIGTRAP。
+        // 而 `TrackStats.empty = TrackStats(points: [])` 正好命中这条路径，
+        // 且它是 static let、在 TrackView 被构造时求值 —— 于是「冷启动必崩」。
+        if valid.count > 1 {
+            for i in 1..<valid.count {
+                dist += TrackStats.haversine(
+                    lat1: valid[i - 1].latitude, lon1: valid[i - 1].longitude,
+                    lat2: valid[i].latitude, lon2: valid[i].longitude
+                )
+            }
         }
         distanceKm = dist
 

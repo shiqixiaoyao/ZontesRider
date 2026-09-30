@@ -153,7 +153,7 @@ public enum FuelCalculationEngine {
             trend: trend,
             pendingLiters: accLiters,
             pendingCost: accCost,
-            pendingDistance: anchor.map { max(0, sorted.last!.odometer - $0.odometer) } ?? 0
+            pendingDistance: anchor.map { a in max(0, (sorted.last?.odometer ?? a.odometer) - a.odometer) } ?? 0
         )
     }
 }
