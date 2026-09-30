@@ -19,10 +19,10 @@ enum CBEvent: Sendable {
     case connectFailed(String)
     case disconnected(String?)
     case servicesDiscovered(String?)
-    case characteristicsDiscovered(CBUUID, String?)
-    case valueReceived(CBUUID, Data?)
-    case valueWritten(CBUUID, String?)
-    case notificationStateChanged(CBUUID, String?)
+    case characteristicsDiscovered(String, String?)
+    case valueReceived(String, Data?)
+    case valueWritten(String, String?)
+    case notificationStateChanged(String, String?)
     case rssi(Int)
 }
 
@@ -68,19 +68,19 @@ final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        handler?(.characteristicsDiscovered(service.uuid, error?.localizedDescription))
+        handler?(.characteristicsDiscovered(service.uuid.uuidString, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.valueReceived(characteristic.uuid, characteristic.value))
+        handler?(.valueReceived(characteristic.uuid.uuidString, characteristic.value))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.valueWritten(characteristic.uuid, error?.localizedDescription))
+        handler?(.valueWritten(characteristic.uuid.uuidString, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.notificationStateChanged(characteristic.uuid, error?.localizedDescription))
+        handler?(.notificationStateChanged(characteristic.uuid.uuidString, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
@@ -339,20 +339,20 @@ public actor BLETransport: TransportProtocol {
                 else { c.resume() }
             }
 
-        case .notificationStateChanged(let uuid, let err):
-            guard uuid == VehicleGATT.notify else { return }
+        case .notificationStateChanged(let uuidString, let err):
+            guard uuidString == VehicleGATT.notify.uuidString else { return }
             if let c = cccdContinuation {
                 cccdContinuation = nil
                 if let err { c.resume(throwing: TransportError.cccdEnableTimeout) }
                 else { c.resume() }
             }
 
-        case .valueReceived(let uuid, let data):
-            guard uuid == VehicleGATT.notify, let data else { return }
+        case .valueReceived(let uuidString, let data):
+            guard uuidString == VehicleGATT.notify.uuidString, let data else { return }
             streamContinuation.yield(.received(data))
 
-        case .valueWritten(let uuid, let err):
-            guard uuid == VehicleGATT.write else { return }
+        case .valueWritten(let uuidString, let err):
+            guard uuidString == VehicleGATT.write.uuidString else { return }
             if let c = writeContinuation {
                 writeContinuation = nil
                 if let err { c.resume(throwing: TransportError.connectFailed(err)) }
