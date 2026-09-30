@@ -27,7 +27,7 @@ public struct RawTelemetry: Decodable {
     public static let speedSentinel: Double = 4_000_000
 
     public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: RawTelemetry.CodingKeys)
+        let c = try decoder.container(keyedBy: RawTelemetry.CodingKeys.self)
 
         func int(_ keys: [CodingKeys]) -> Int? {
             for k in keys {
