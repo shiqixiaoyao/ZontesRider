@@ -88,6 +88,12 @@ final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 /// 全生命周期状态机都关在这个 actor 里：
 /// 扫描 → 连接 → 服务发现（5s）→ 特征发现 → CCCD 使能（3s）→ ready。
 /// 写入强制 180ms 节流 + 900ms 写响应超时（参数全部来自反编译实锤）。
+///
+/// ⚠️ 并发纪律（CI 编译器验证过的教训）：
+/// continuation 的**注册**只允许出现在 actor 方法同步上下文中
+/// （withCheckedThrowingContinuation 的 body 会同步继承调用方隔离）；
+/// 超时一律用「看门狗 Task → actor 清理方法 resume pending」的三态互斥模式，
+/// 严禁在 @Sendable 闭包里直接改 actor 属性。
 public actor BLETransport: TransportProtocol {
 
     // MARK: 事件流
@@ -148,41 +154,45 @@ public actor BLETransport: TransportProtocol {
 
         try await ensurePoweredOn()
 
-        // 1. 扫描（优先走系统已连接列表，其次空口扫描）
+        // 1. 扫描（优先系统已连接列表，其次空口扫描，12s 超时）
         state = .scanning
         let target = try await findPeripheral()
 
-        // 2. 连接
+        // 2. 连接（10s 超时）
         state = .connecting
         peripheral = target
         target.delegate = proxy
-        central.connect(target, options: nil)
-        try await withTimeoutTrace(seconds: 10, error: TransportError.connectFailed("10s 超时")) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                connectContinuation = c
-            }
+        let connectWatchdog = makeWatchdog(seconds: 10) { [weak self] in
+            await self?.timeout(\.connectContinuation, TransportError.connectFailed("10s 超时"))
+        }
+        defer { connectWatchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            connectContinuation = c
+            central.connect(target, options: nil)
         }
 
         // 3. 服务发现（反编译：5s 超时）
         state = .discovering
-        target.discoverServices([VehicleGATT.service])
-        try await withTimeoutTrace(seconds: BLETuning.serviceDiscoveryTimeout,
-                                   error: TransportError.serviceDiscoveryTimeout) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                servicesContinuation = c
-            }
+        let svcWatchdog = makeWatchdog(seconds: BLETuning.serviceDiscoveryTimeout) { [weak self] in
+            await self?.timeout(\.servicesContinuation, TransportError.serviceDiscoveryTimeout)
+        }
+        defer { svcWatchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            servicesContinuation = c
+            target.discoverServices([VehicleGATT.service])
         }
         guard let service = target.services?.first(where: { $0.uuid == VehicleGATT.service }) else {
             throw TransportError.characteristicMissing
         }
 
-        // 4. 特征发现
-        target.discoverCharacteristics([VehicleGATT.write, VehicleGATT.notify], for: service)
-        try await withTimeoutTrace(seconds: BLETuning.serviceDiscoveryTimeout,
-                                   error: TransportError.serviceDiscoveryTimeout) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                charsContinuation = c
-            }
+        // 4. 特征发现（5s 超时）
+        let chrWatchdog = makeWatchdog(seconds: BLETuning.serviceDiscoveryTimeout) { [weak self] in
+            await self?.timeout(\.charsContinuation, TransportError.serviceDiscoveryTimeout)
+        }
+        defer { chrWatchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            charsContinuation = c
+            target.discoverCharacteristics([VehicleGATT.write, VehicleGATT.notify], for: service)
         }
         guard let w = service.characteristics?.first(where: { $0.uuid == VehicleGATT.write }),
               let n = service.characteristics?.first(where: { $0.uuid == VehicleGATT.notify }) else {
@@ -192,12 +202,13 @@ public actor BLETransport: TransportProtocol {
         notifyChar = n
 
         // 5. CCCD 使能（反编译：3s 超时）
-        target.setNotifyValue(true, for: n)
-        try await withTimeoutTrace(seconds: BLETuning.cccdEnableTimeout,
-                                   error: TransportError.cccdEnableTimeout) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                cccdContinuation = c
-            }
+        let cccdWatchdog = makeWatchdog(seconds: BLETuning.cccdEnableTimeout) { [weak self] in
+            await self?.timeout(\.cccdContinuation, TransportError.cccdEnableTimeout)
+        }
+        defer { cccdWatchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            cccdContinuation = c
+            target.setNotifyValue(true, for: n)
         }
 
         state = .ready
@@ -225,12 +236,13 @@ public actor BLETransport: TransportProtocol {
             try? await Task.sleep(for: throttle - elapsed)
         }
 
-        try await withTimeoutTrace(seconds: BLETuning.writeAckTimeout,
-                                   error: TransportError.writeTimeout) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                writeContinuation = c
-                p.writeValue(data, for: w, type: .withResponse)
-            }
+        let watchdog = makeWatchdog(seconds: BLETuning.writeAckTimeout) { [weak self] in
+            await self?.timeout(\.writeContinuation, TransportError.writeTimeout)
+        }
+        defer { watchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            writeContinuation = c
+            p.writeValue(data, for: w, type: .withResponse)
         }
         lastWriteAt = .now
     }
@@ -245,7 +257,7 @@ public actor BLETransport: TransportProtocol {
 
         case .poweredOff:
             failAllWaiters(TransportError.bluetoothPoweredOff)
-            if case .ready = state {} else if case .idle = state {} else {
+            if state != .idle {
                 state = .failed("蓝牙已关闭")
             }
 
@@ -328,10 +340,12 @@ public actor BLETransport: TransportProtocol {
         if central.state == .poweredOn { return }
         if central.state == .unauthorized { throw TransportError.bluetoothUnauthorized }
         if central.state == .poweredOff { throw TransportError.bluetoothPoweredOff }
-        try await withTimeoutTrace(seconds: 5, error: TransportError.bluetoothPoweredOff) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                poweredOnWaiters.append(c)
-            }
+        let watchdog = makeWatchdog(seconds: 5) { [weak self] in
+            await self?.timeoutPoweredOn()
+        }
+        defer { watchdog.cancel() }
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            poweredOnWaiters.append(c)
         }
     }
 
@@ -342,14 +356,15 @@ public actor BLETransport: TransportProtocol {
         let connected = central.retrieveConnectedPeripherals(withServices: [VehicleGATT.service])
         if let p = connected.first { return p }
 
-        central.scanForPeripherals(withServices: [VehicleGATT.service], options: [
-            CBCentralManagerScanOptionAllowDuplicatesKey: false,
-        ])
-        defer { central.stopScan() }
-        return try await withTimeoutTrace(seconds: 12, error: TransportError.peripheralNotFound(timeout: 12)) {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<CBPeripheral, Error>) in
-                discoveredContinuation = c
-            }
+        let watchdog = makeWatchdog(seconds: 12) { [weak self] in
+            await self?.timeoutDiscover()
+        }
+        defer { watchdog.cancel() }
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<CBPeripheral, Error>) in
+            discoveredContinuation = c
+            central.scanForPeripherals(withServices: [VehicleGATT.service], options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey: false,
+            ])
         }
     }
 
@@ -367,7 +382,7 @@ public actor BLETransport: TransportProtocol {
                 if Task.isCancelled { return }
                 do {
                     try await self.connect()
-                    return // 成功，connect() 内部已把 intentionalDisconnect 复位
+                    return // 成功（connect 内部已复位 intentionalDisconnect）
                 } catch {
                     if Task.isCancelled { return }
                     // 继续下一轮退避
@@ -383,32 +398,43 @@ public actor BLETransport: TransportProtocol {
         notifyChar = nil
     }
 
+    // MARK: 看门狗 + continuation 清理（三态互斥：事件 resume / 看门狗 resume / 主动失败 resume）
+
+    /// 看门狗：到点在 actor 上执行清理动作（resume 对应 pending）
+    private func makeWatchdog(seconds: TimeInterval,
+                              _ action: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        Task {
+            try? await Task.sleep(for: .seconds(seconds))
+            await action()
+        }
+    }
+
+    private func timeout<T>(_ keyPath: ReferenceWritableKeyPath<BLETransport, CheckedContinuation<T, Error>?>,
+                            _ error: Error) {
+        guard let c = self[keyPath: keyPath] else { return }
+        self[keyPath: keyPath] = nil
+        c.resume(throwing: error)
+    }
+
+    private func timeoutPoweredOn() {
+        guard !poweredOnWaiters.isEmpty else { return }
+        for c in poweredOnWaiters { c.resume(throwing: TransportError.bluetoothPoweredOff) }
+        poweredOnWaiters.removeAll()
+    }
+
+    private func timeoutDiscover() {
+        central.stopScan()
+        timeout(\.discoveredContinuation, TransportError.peripheralNotFound(timeout: 12))
+    }
+
     private func failAllWaiters(_ error: Error) {
         for c in poweredOnWaiters { c.resume(throwing: error) }
         poweredOnWaiters.removeAll()
-        discoveredContinuation?.resume(throwing: error); discoveredContinuation = nil
-        connectContinuation?.resume(throwing: error); connectContinuation = nil
-        servicesContinuation?.resume(throwing: error); servicesContinuation = nil
-        charsContinuation?.resume(throwing: error); charsContinuation = nil
-        cccdContinuation?.resume(throwing: error); cccdContinuation = nil
-        writeContinuation?.resume(throwing: error); writeContinuation = nil
-    }
-
-    /// 通用超时：operation 与闹钟赛跑，输家取消
-    private func withTimeoutTrace<T: Sendable>(
-        seconds: TimeInterval,
-        error: @autoclosure @escaping @Sendable () -> Error,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await operation() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                throw error()
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
+        timeout(\.discoveredContinuation, error)
+        timeout(\.connectContinuation, error)
+        timeout(\.servicesContinuation, error)
+        timeout(\.charsContinuation, error)
+        timeout(\.cccdContinuation, error)
+        timeout(\.writeContinuation, error)
     }
 }
