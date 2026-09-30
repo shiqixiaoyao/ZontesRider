@@ -5,6 +5,11 @@ import CoreBluetooth
 
 /// 代理回调全部发生在专属串行队列，桥对象只做一件事：把事件原样抛进 actor。
 /// 桥自身不持有任何可变状态，天然无数据竞争。
+///
+/// ⚠️ 这里**只允许携带值类型**（CBUUID / Data / String / Int）：
+///    CoreBluetooth 的 CBCharacteristic / CBService / CBPeripheral 都是非 Sendable 的
+///    ObjC 类，塞进 Sendable 枚举的关联值会被 Swift 6 语言模式判成 error。
+///    做法：在代理这一层就把需要的字段（uuid、value）取出来，再跨并发域传递。
 enum CBEvent: Sendable {
     case poweredOn
     case poweredOff
@@ -14,10 +19,10 @@ enum CBEvent: Sendable {
     case connectFailed(String)
     case disconnected(String?)
     case servicesDiscovered(String?)
-    case characteristicsDiscovered(CBService, String?)
-    case valueReceived(CBCharacteristic)
-    case valueWritten(CBCharacteristic, String?)
-    case notificationStateChanged(CBCharacteristic, String?)
+    case characteristicsDiscovered(CBUUID, String?)
+    case valueReceived(CBUUID, Data?)
+    case valueWritten(CBUUID, String?)
+    case notificationStateChanged(CBUUID, String?)
     case rssi(Int)
 }
 
@@ -63,19 +68,19 @@ final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        handler?(.characteristicsDiscovered(service, error?.localizedDescription))
+        handler?(.characteristicsDiscovered(service.uuid, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.valueReceived(characteristic))
+        handler?(.valueReceived(characteristic.uuid, characteristic.value))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.valueWritten(characteristic, error?.localizedDescription))
+        handler?(.valueWritten(characteristic.uuid, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        handler?(.notificationStateChanged(characteristic, error?.localizedDescription))
+        handler?(.notificationStateChanged(characteristic.uuid, error?.localizedDescription))
     }
 
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
@@ -334,20 +339,20 @@ public actor BLETransport: TransportProtocol {
                 else { c.resume() }
             }
 
-        case .notificationStateChanged(let ch, let err):
-            guard ch.uuid == VehicleGATT.notify else { return }
+        case .notificationStateChanged(let uuid, let err):
+            guard uuid == VehicleGATT.notify else { return }
             if let c = cccdContinuation {
                 cccdContinuation = nil
                 if let err { c.resume(throwing: TransportError.cccdEnableTimeout) }
                 else { c.resume() }
             }
 
-        case .valueReceived(let ch):
-            guard ch.uuid == VehicleGATT.notify, let data = ch.value else { return }
+        case .valueReceived(let uuid, let data):
+            guard uuid == VehicleGATT.notify, let data else { return }
             streamContinuation.yield(.received(data))
 
-        case .valueWritten(let ch, let err):
-            guard ch.uuid == VehicleGATT.write else { return }
+        case .valueWritten(let uuid, let err):
+            guard uuid == VehicleGATT.write else { return }
             if let c = writeContinuation {
                 writeContinuation = nil
                 if let err { c.resume(throwing: TransportError.connectFailed(err)) }
