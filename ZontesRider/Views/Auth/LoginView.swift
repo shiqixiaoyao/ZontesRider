@@ -186,6 +186,9 @@ public struct VehicleProfileView: View {
                             }
                         }
 
+                        // 启动诊断（自签包没有控制台，靠它定位闪退）
+                        DiagnosticsCard()
+
                         // 退出
                         Button {
                             confirmLogout = true
@@ -262,6 +265,70 @@ public struct VehicleProfileView: View {
                 .foregroundStyle(SovietPalette.textPrimary)
                 .lineLimit(1)
         }
+    }
+}
+
+// MARK: - 启动诊断卡
+
+/// 显示「上次启动走到哪一步」+ 落盘的异常原因。
+/// 闪退后重新打开 App，进「我的」工段即可看到，把内容截图发我就能定位。
+private struct DiagnosticsCard: View {
+    @State private var showDetail = false
+
+    private var phase: String { LaunchTrace.phase ?? "（无记录）" }
+    private var crash: String? { LaunchTrace.crash }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SovietSectionLabel("启动诊断")
+
+            HStack {
+                Text("上次止于")
+                    .font(.soviet(11))
+                    .foregroundStyle(SovietPalette.textMuted)
+                Spacer()
+                Text(phase)
+                    .font(.soviet(11))
+                    .monospacedDigit()
+                    .foregroundStyle(LaunchTrace.lastLaunchSurvived ? SovietPalette.ok : SovietPalette.danger)
+                    .lineLimit(1)
+            }
+
+            if crash == nil {
+                Text("未捕获到 NSException（若是 Swift 致命错误，看上面的阶段即可定位）")
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.textFaint)
+            } else {
+                Button {
+                    showDetail.toggle()
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text(showDetail ? "收起异常详情" : "展开上次异常详情")
+                            .font(.soviet(11))
+                        Spacer()
+                    }
+                    .foregroundStyle(SovietPalette.danger)
+                }
+                .buttonStyle(.plain)
+
+                if showDetail {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(crash ?? "")
+                            .font(.soviet(9))
+                            .foregroundStyle(SovietPalette.textSecondary)
+                    }
+                    .frame(maxHeight: 160)
+
+                    Button("清除记录") { LaunchTrace.clearCrash() }
+                        .font(.soviet(10))
+                        .foregroundStyle(SovietPalette.textMuted)
+                }
+            }
+        }
+        .padding(14)
+        .constructivistCard(borderColor: SovietPalette.black)
     }
 }
 

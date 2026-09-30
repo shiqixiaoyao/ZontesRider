@@ -9,8 +9,16 @@ import Foundation
 //   鉴权头  : X-Token: <accessToken>（JWT / RS256）
 //   车辆列表: GET  /pkeapp/motor/getMyMotorList?source=myList
 //   实时车况: GET  /pkeapp/gx/pke/carData/getHomeData?pkeCode=<...>
+//   历史轨迹: GET  /pkeapp/hbaseLocation/selectByCarCodeHbase/<carCode>?startTime=<...>&endTime=<...>
 //
 // 响应包膜统一为 { "code": Int, "msg": String, "data": ... }，code==200 为成功。
+//
+// ⚠️ 2026-09-30 实测校准（第二轮）：
+//   1. getHomeData 的有效载荷在 data.myCarData 里（data 顶层只有 istate / carLocation / freezingMode）
+//      —— 上一版直接把 data 当车况解码，导致所有字段为 nil，这就是「登录后无数据刷新」的根因。
+//   2. 车辆列表的 PKE 字段实测是 pkecode（全小写）与 pKECode，不是 pkeCode；
+//      车名 itemName、车架 cheJia、号牌 liencePlate、mcu mcuid、服务期 serviceValidTime。
+//   3. 胎压额定值是 ratedFrontPressure / ratedRearPressure。
 
 public enum IfinoError: Error, LocalizedError, Sendable {
     case badURL
@@ -19,6 +27,7 @@ public enum IfinoError: Error, LocalizedError, Sendable {
     case decoding(String)
     case unauthorized
     case network(String)
+    case noVehicle
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +37,7 @@ public enum IfinoError: Error, LocalizedError, Sendable {
         case .decoding(let d):           return "响应解析失败：\(d)"
         case .unauthorized:              return "登录已过期，请重新登录"
         case .network(let d):            return "网络错误：\(d)"
+        case .noVehicle:                 return "账号下无可用车辆"
         }
     }
 }
@@ -61,31 +71,38 @@ public struct TokenPayload: Decodable, Sendable {
     }
 }
 
-// MARK: DTO · 车辆
+// MARK: DTO · 车辆（字段名按 2026-09-30 实测 JSON 校准）
 
 public struct MotorVehicle: Decodable, Sendable, Identifiable {
     public let pkeCode: String
-    public let motorName: String?
-    public let motorCode: String?
-    public let frameNumber: String?
-    public let plateNumber: String?
+    public let motorName: String?      // itemName
+    public let motorCode: String?      // itemCode
+    public let frameNumber: String?    // cheJia
+    public let plateNumber: String?    // liencePlate
     public let imsi: String?
-    public let mcuID: String?
-    public let serviceEndTime: String?
+    public let mcuID: String?          // mcuid
+    public let serviceEndTime: String? // serviceValidTime
     public let isShowOilTankAndSeatCushion: Bool
 
     public var id: String { pkeCode }
 
-    /// 展示名：优先 motorName，回落 pkeCode 尾 6 位
+    /// 展示名：优先 itemName，回落 pkeCode 尾 6 位
     public var displayName: String {
         if let n = motorName, !n.isEmpty { return n }
         return "车辆 ·\(pkeCode.suffix(6))"
     }
 
     enum CodingKeys: String, CodingKey {
-        case pkeCode, motorName, motorCode, frameNumber, plateNumber, imsi, mcuID, serviceEndTime
-        case showFlag1 = "isShowOilTankAndSeatCushion"
-        case showFlag2 = "isShowTankAndSeat"
+        // PKE：三种大小写形态都见过，全列上
+        case pkecode, pKECode, pkeCode, PKECode
+        case itemName, motorTypeName, motorName
+        case itemCode, motorCode
+        case cheJia, frameNumber, chejia
+        case liencePlate, plateNumber
+        case imsi, IMSI
+        case mcuid, mcuID, McuID
+        case serviceValidTime, serviceEndTime
+        case isShowOilTankAndSeatCushion, isShowTankAndSeat
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,16 +113,25 @@ public struct MotorVehicle: Decodable, Sendable, Identifiable {
             if let n = try? c.decode(Double.self, forKey: k) { return String(n) }
             return nil
         }
-        pkeCode        = str(.pkeCode) ?? ""
-        motorName      = str(.motorName)
-        motorCode      = str(.motorCode)
-        frameNumber    = str(.frameNumber)
-        plateNumber    = str(.plateNumber)
-        imsi           = str(.imsi)
-        mcuID          = str(.mcuID)
-        serviceEndTime = str(.serviceEndTime)
-        if let b = try? c.decode(Bool.self, forKey: .showFlag1) { isShowOilTankAndSeatCushion = b }
-        else { isShowOilTankAndSeatCushion = (str(.showFlag1) ?? str(.showFlag2)) == "true" }
+        func first(_ keys: [CodingKeys]) -> String? {
+            for k in keys { if let v = str(k), !v.isEmpty { return v } }
+            return nil
+        }
+
+        pkeCode        = first([.pkecode, .pKECode, .PKECode, .pkeCode]) ?? ""
+        motorName      = first([.itemName, .motorTypeName, .motorName])
+        motorCode      = first([.itemCode, .motorCode])
+        frameNumber    = first([.cheJia, .frameNumber, .chejia])
+        plateNumber    = first([.liencePlate, .plateNumber])
+        imsi           = first([.imsi, .IMSI])
+        mcuID          = first([.mcuid, .mcuID, .McuID])
+        serviceEndTime = first([.serviceValidTime, .serviceEndTime])
+        if let b = try? c.decode(Bool.self, forKey: .isShowOilTankAndSeatCushion) {
+            isShowOilTankAndSeatCushion = b
+        } else {
+            let s = str(.isShowOilTankAndSeatCushion) ?? str(.isShowTankAndSeat) ?? ""
+            isShowOilTankAndSeatCushion = (s == "true" || s == "1")
+        }
     }
 }
 
@@ -141,18 +167,50 @@ public actor IfinoAPIClient {
     // MARK: 车辆列表
 
     public func getMyMotorList(token: String) async throws -> [MotorVehicle] {
-        try await request(path: "/pkeapp/motor/getMyMotorList?source=myList",
-                          method: "GET", form: nil, token: token)
+        let list: [MotorVehicle] = try await request(
+            path: "/pkeapp/motor/getMyMotorList?source=myList",
+            method: "GET", form: nil, token: token
+        )
+        return list.filter { !$0.pkeCode.isEmpty }
     }
 
     // MARK: 实时车况
 
+    /// 实测：data = { istate, carLocation:{latitude,longitude}, myCarData:{...全部车况字段...} }
     public func getHomeData(pkeCode: String, token: String) async throws -> VehicleTelemetry {
+        guard !pkeCode.isEmpty else { throw IfinoError.noVehicle }
         var comps = URLComponents(string: Self.baseURL + "/pkeapp/gx/pke/carData/getHomeData")
         comps?.queryItems = [URLQueryItem(name: "pkeCode", value: pkeCode)]
         guard let url = comps?.url else { throw IfinoError.badURL }
-        let raw: RawTelemetry = try await perform(url: url, method: "GET", form: nil, token: token)
-        return VehicleTelemetry(raw: raw)
+        let env: Envelope<HomeDataPayload> = try await perform(
+            url: url, method: "GET", form: nil, token: token
+        )
+        guard let payload = env.data, let raw = payload.myCarData else {
+            throw IfinoError.decoding("getHomeData 缺 myCarData")
+        }
+        return VehicleTelemetry(raw: raw, location: payload.carLocation)
+    }
+
+    // MARK: 历史轨迹（实测 2026-09-30 打通）
+
+    /// GET /pkeapp/hbaseLocation/selectByCarCodeHbase/<carCode>?startTime=<yyyy-MM-dd HH:mm:ss>&endTime=<...>
+    /// 返回 HBase 里的轨迹点：经纬度 / 时间 / 车速 / 里程 / 电压 / 锁状态
+    public func getTrack(carCode: String,
+                         startTime: Date,
+                         endTime: Date,
+                         token: String) async throws -> [TrackPoint] {
+        guard !carCode.isEmpty else { throw IfinoError.noVehicle }
+        let fmt = Self.backendFormatter
+        var comps = URLComponents(
+            string: Self.baseURL + "/pkeapp/hbaseLocation/selectByCarCodeHbase/\(carCode)"
+        )
+        comps?.queryItems = [
+            URLQueryItem(name: "startTime", value: fmt.string(from: startTime)),
+            URLQueryItem(name: "endTime", value: fmt.string(from: endTime)),
+        ]
+        guard let url = comps?.url else { throw IfinoError.badURL }
+        let points: [TrackPoint] = try await perform(url: url, method: "GET", form: nil, token: token)
+        return points
     }
 
     // MARK: - 内部
@@ -213,4 +271,12 @@ public actor IfinoAPIClient {
         allowed.insert(charactersIn: "-._~")
         return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
+
+    /// 服务端只认 "yyyy-MM-dd HH:mm:ss"
+    public static let backendFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 }

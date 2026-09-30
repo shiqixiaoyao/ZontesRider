@@ -41,20 +41,23 @@ public enum AppTab: Int, CaseIterable, Identifiable {
 public struct RootView: View {
     @Environment(AuthStore.self) private var auth
     @State private var selection: AppTab = .dashboard
+    /// 全局唯一蓝牙会话：控车指令经它下发给车机（pkeCode 随选中车辆重建）
+    /// 惰性：init 不碰 CoreBluetooth，只有用户点「连接车机」才建栈
+    @State private var ble = BLESession(pkeCode: "")
+    /// 安全模式：上次启动没跑满 6 秒（说明进程被杀了）就降级启动——
+    /// 只挂演示仪表盘，不装配蓝牙会话，先把界面撑起来让用户能进来看诊断。
+    @State private var safeMode = !LaunchTrace.lastLaunchSurvived
 
-    public init() {}
+    // BLESession 是 MainActor 隔离类型，init 必须在主线程上下文求值
+    @MainActor public init() {}
 
     public var body: some View {
         TabView(selection: $selection) {
-            DashboardContainer()
+            DashboardContainer(ble: safeMode ? nil : ble)
                 .tag(AppTab.dashboard)
 
-            SovietPlaceholderView(
-                title: "轨迹工段",
-                subtitle: "骑行轨迹 · GPS 回放 · 路线归档",
-                milestone: "待接入：CoreLocation 轨迹记录"
-            )
-            .tag(AppTab.track)
+            TrackView()
+                .tag(AppTab.track)
 
             FuelTrackerView()
                 .tag(AppTab.fuel)
@@ -70,6 +73,55 @@ public struct RootView: View {
             SovietTabBar(selection: $selection)
         }
         .tint(SovietPalette.brass)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if safeMode { SafeModeBanner { safeMode = false } }
+        }
+        .onAppear { LaunchTrace.mark("root.appear") }
+        .task {
+            LaunchTrace.mark("root.task")
+            guard !safeMode else { return }
+            ble.reconfigure(pkeCode: auth.activePKECode ?? "")
+        }
+        .onChange(of: auth.activePKECode) { _, newValue in
+            guard !safeMode else { return }
+            ble.reconfigure(pkeCode: newValue ?? "")
+        }
+    }
+}
+
+// MARK: - 安全模式提示条
+
+/// 上次启动没跑到 stable 时出现在顶部。
+/// 点「恢复正常」才装配蓝牙会话——这样即使某处仍有问题，用户至少能进 App 看诊断。
+private struct SafeModeBanner: View {
+    let restore: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+            Text("安全模式：上次启动异常，已停用蓝牙会话")
+                .font(.soviet(10))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer()
+            Button("恢复正常", action: restore)
+                .font(.soviet(10))
+                .tracking(1)
+                .foregroundStyle(SovietPalette.castIron)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(SovietPalette.brass)
+                .border(SovietPalette.black, width: 2)
+                .buttonStyle(.plain)
+        }
+        .foregroundStyle(SovietPalette.brassPale)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(SovietPalette.redDark)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(SovietPalette.black).frame(height: 2)
+        }
     }
 }
 
@@ -77,6 +129,7 @@ public struct RootView: View {
 
 private struct DashboardContainer: View {
     @Environment(AuthStore.self) private var auth
+    let ble: BLESession
 
     var body: some View {
         if auth.isLoggedIn {
@@ -84,7 +137,8 @@ private struct DashboardContainer: View {
                 viewModel: DashboardViewModel(
                     connection: .connecting,
                     provider: CloudTelemetryProvider(auth: auth)
-                )
+                ),
+                ble: ble
             )
         } else {
             DashboardView()
