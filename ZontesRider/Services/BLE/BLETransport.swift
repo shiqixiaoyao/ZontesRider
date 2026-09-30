@@ -163,7 +163,7 @@ public actor BLETransport: TransportProtocol {
         peripheral = target
         target.delegate = proxy
         let connectWatchdog = makeWatchdog(seconds: 10) { [weak self] in
-            await self?.timeout(\.connectContinuation, TransportError.connectFailed("10s 超时"))
+            await self?.timeoutConnect()
         }
         defer { connectWatchdog.cancel() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -174,7 +174,7 @@ public actor BLETransport: TransportProtocol {
         // 3. 服务发现（反编译：5s 超时）
         state = .discovering
         let svcWatchdog = makeWatchdog(seconds: BLETuning.serviceDiscoveryTimeout) { [weak self] in
-            await self?.timeout(\.servicesContinuation, TransportError.serviceDiscoveryTimeout)
+            await self?.timeoutServices()
         }
         defer { svcWatchdog.cancel() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -187,7 +187,7 @@ public actor BLETransport: TransportProtocol {
 
         // 4. 特征发现（5s 超时）
         let chrWatchdog = makeWatchdog(seconds: BLETuning.serviceDiscoveryTimeout) { [weak self] in
-            await self?.timeout(\.charsContinuation, TransportError.serviceDiscoveryTimeout)
+            await self?.timeoutChars()
         }
         defer { chrWatchdog.cancel() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -203,7 +203,7 @@ public actor BLETransport: TransportProtocol {
 
         // 5. CCCD 使能（反编译：3s 超时）
         let cccdWatchdog = makeWatchdog(seconds: BLETuning.cccdEnableTimeout) { [weak self] in
-            await self?.timeout(\.cccdContinuation, TransportError.cccdEnableTimeout)
+            await self?.timeoutCCCD()
         }
         defer { cccdWatchdog.cancel() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -237,7 +237,7 @@ public actor BLETransport: TransportProtocol {
         }
 
         let watchdog = makeWatchdog(seconds: BLETuning.writeAckTimeout) { [weak self] in
-            await self?.timeout(\.writeContinuation, TransportError.writeTimeout)
+            await self?.timeoutWrite()
         }
         defer { watchdog.cancel() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
@@ -409,11 +409,34 @@ public actor BLETransport: TransportProtocol {
         }
     }
 
-    private func timeout<T>(_ keyPath: ReferenceWritableKeyPath<BLETransport, CheckedContinuation<T, Error>?>,
-                            _ error: Error) {
-        guard let c = self[keyPath: keyPath] else { return }
-        self[keyPath: keyPath] = nil
-        c.resume(throwing: error)
+    private func timeoutConnect() {
+        guard let c = connectContinuation else { return }
+        connectContinuation = nil
+        c.resume(throwing: TransportError.connectFailed("10s 超时"))
+    }
+
+    private func timeoutServices() {
+        guard let c = servicesContinuation else { return }
+        servicesContinuation = nil
+        c.resume(throwing: TransportError.serviceDiscoveryTimeout)
+    }
+
+    private func timeoutChars() {
+        guard let c = charsContinuation else { return }
+        charsContinuation = nil
+        c.resume(throwing: TransportError.serviceDiscoveryTimeout)
+    }
+
+    private func timeoutCCCD() {
+        guard let c = cccdContinuation else { return }
+        cccdContinuation = nil
+        c.resume(throwing: TransportError.cccdEnableTimeout)
+    }
+
+    private func timeoutWrite() {
+        guard let c = writeContinuation else { return }
+        writeContinuation = nil
+        c.resume(throwing: TransportError.writeTimeout)
     }
 
     private func timeoutPoweredOn() {
@@ -424,17 +447,19 @@ public actor BLETransport: TransportProtocol {
 
     private func timeoutDiscover() {
         central.stopScan()
-        timeout(\.discoveredContinuation, TransportError.peripheralNotFound(timeout: 12))
+        guard let c = discoveredContinuation else { return }
+        discoveredContinuation = nil
+        c.resume(throwing: TransportError.peripheralNotFound(timeout: 12))
     }
 
     private func failAllWaiters(_ error: Error) {
         for c in poweredOnWaiters { c.resume(throwing: error) }
         poweredOnWaiters.removeAll()
-        timeout(\.discoveredContinuation, error)
-        timeout(\.connectContinuation, error)
-        timeout(\.servicesContinuation, error)
-        timeout(\.charsContinuation, error)
-        timeout(\.cccdContinuation, error)
-        timeout(\.writeContinuation, error)
+        discoveredContinuation?.resume(throwing: error); discoveredContinuation = nil
+        connectContinuation?.resume(throwing: error); connectContinuation = nil
+        servicesContinuation?.resume(throwing: error); servicesContinuation = nil
+        charsContinuation?.resume(throwing: error); charsContinuation = nil
+        cccdContinuation?.resume(throwing: error); cccdContinuation = nil
+        writeContinuation?.resume(throwing: error); writeContinuation = nil
     }
 }
