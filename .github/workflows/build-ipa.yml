@@ -6,21 +6,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  # ═════════════════════════════════════════════════════════════
+  # 作业 1：模拟器冒烟测试
+  #
+  # 这是本轮最关键的诊断手段。iOS 模拟器**完全不涉及**签名/描述文件/
+  # 证书/AltStore，所以：
+  #   · 模拟器里就崩  → 是 ZontesRider 的代码问题，日志会直接给出原因
+  #   · 模拟器里不崩  → 代码没问题，闪退出在签名/装机/证书这条链路上
+  # 同时把应用程序容器里的 launch.phase.txt / last-crash.txt 抓出来，
+  # 那是我们自己写的"死在第几步"证据。
+  # ═════════════════════════════════════════════════════════════
+  smoke:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 抗闪退关键 2/2：钉住工具链。
-      # 之前用 latest-stable（当前 Xcode 26 / SDK iOS 26.2）编译，产物在人家 iOS 17/18
-      # 的真机上点开即闪退。Xcode 16.x（SDK iOS 18）编译出来的包在 iOS 17+ 上最稳，
-      # 也不会有新版 SDK 引入的运行期符号依赖。
       - name: Select Xcode
         run: |
-          echo "== 可用 Xcode =="
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
           PICK=""
           for v in 16.4 16.3 16.2 16.1 16.0 15.4; do
             if [ -d "/Applications/Xcode_$v.app" ]; then PICK="/Applications/Xcode_$v.app"; break; fi
@@ -28,9 +32,143 @@ jobs:
           if [ -z "$PICK" ]; then
             PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -v 'Xcode_26' | head -1 || true)"
           fi
-          if [ -z "$PICK" ]; then
-            PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)"
+          if [ -z "$PICK" ]; then PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)"; fi
+          echo "选中: $PICK"
+          sudo xcode-select -s "$PICK/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Pick a simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['devices']
+for rt in sorted(d, reverse=True):
+    if 'iOS' not in rt: continue
+    for dev in d[rt]:
+        if dev.get('isAvailable') and dev['name'].startswith('iPhone'):
+            print(dev['udid']); raise SystemExit
+")
+          echo "udid=$UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices available | head -20
+
+      # 模拟器构建不要 CODE_SIGNING_ALLOWED=NO，让 Xcode 正常做 ad-hoc 签名，
+      # 否则 simctl install 会拒绝安装。
+      - name: Build for simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ZontesRider.xcodeproj \
+            -scheme ZontesRider \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build/sim \
+            build 2>&1 | tail -60
+
+      - name: Boot simulator and install
+        run: |
+          UDID="${{ steps.sim.outputs.udid }}"
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          APP="build/sim/Build/Products/Debug-iphonesimulator/ZontesRider.app"
+          ls -la "$APP"
+          xcrun simctl install "$UDID" "$APP"
+          echo "installed ok"
+
+      - name: Launch and observe
+        run: |
+          UDID="${{ steps.sim.outputs.udid }}"
+          BID="com.shiqixiaoyao.zontesrider"
+          set +e
+
+          # --console-pty 会一直挂着并转发 App 的 stdout/stderr；
+          # 若进程提前退出，命令也会返回。
+          xcrun simctl launch --console-pty "$UDID" "$BID" > sim-console.log 2>&1 &
+          LP=$!
+          sleep 25
+
+          if kill -0 $LP 2>/dev/null; then
+            echo "SMOKE_RESULT=alive" >> "$GITHUB_ENV"
+            echo "✅ 模拟器里存活 25s —— 代码路径没问题"
+            kill $LP 2>/dev/null
+          else
+            echo "SMOKE_RESULT=crashed" >> "$GITHUB_ENV"
+            echo "❌ 模拟器里就退出了 —— 代码路径有问题"
           fi
+
+          echo "══════════ App 控制台输出 ══════════"
+          cat sim-console.log 2>/dev/null || true
+
+          echo "══════════ 容器内的启动轨迹 ══════════"
+          C=$(xcrun simctl get_app_container "$UDID" "$BID" data 2>&1)
+          echo "container: $C"
+          echo "--- launch.phase.txt ---"
+          cat "$C/Documents/launch.phase.txt" 2>/dev/null || echo "(无)"
+          echo ""
+          echo "--- last-crash.txt ---"
+          cat "$C/Documents/last-crash.txt" 2>/dev/null || echo "(无)"
+          echo ""
+
+          echo "══════════ 模拟器崩溃报告 ══════════"
+          ls -la ~/Library/Logs/DiagnosticReports/ 2>/dev/null | tail -20 || true
+          for f in ~/Library/Logs/DiagnosticReports/ZontesRider*; do
+            [ -e "$f" ] || continue
+            echo "--- $f ---"
+            head -80 "$f"
+          done
+
+          echo "══════════ 系统日志（致命/异常/dyld）══════════"
+          xcrun simctl spawn "$UDID" log show --last 3m --style compact 2>/dev/null \
+            | grep -iE "zontes|fatal|Fatal error|precondition|crash|dyld|uncaught|terminating" \
+            | tail -100 || true
+
+          echo "══════════ 进程是否还活着 ══════════"
+          xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i zontes || echo "(进程不在)"
+          exit 0
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-smoke-logs
+          path: sim-console.log
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ═════════════════════════════════════════════════════════════
+  # 作业 2：出两个未签名 IPA
+  #   · ZontesRider —— 主包
+  #   · ZontesMinimal —— 最小复现包（全新 bundle id，零依赖）
+  # 两个都装一次，就能判定问题在代码还是在签名链路。
+  # ═════════════════════════════════════════════════════════════
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 抗闪退关键：钉住工具链。
+      # latest-stable 实为 Xcode 26 / SDK iOS 26.2，产物在 iOS 17/18 真机上
+      # 点开即闪退；Xcode 16.x（SDK iOS 18）编译的包在 iOS 17+ 上最稳。
+      - name: Select Xcode
+        run: |
+          PICK=""
+          for v in 16.4 16.3 16.2 16.1 16.0 15.4; do
+            if [ -d "/Applications/Xcode_$v.app" ]; then PICK="/Applications/Xcode_$v.app"; break; fi
+          done
+          if [ -z "$PICK" ]; then
+            PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | grep -v 'Xcode_26' | head -1 || true)"
+          fi
+          if [ -z "$PICK" ]; then PICK="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -1)"; fi
           echo "选中: $PICK"
           sudo xcode-select -s "$PICK/Contents/Developer"
           xcodebuild -version
@@ -41,45 +179,59 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build unsigned Release
+      - name: Build unsigned Release (both targets)
         run: |
-          xcodebuild \
-            -project ZontesRider.xcodeproj \
-            -scheme ZontesRider \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build/DerivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            IPHONEOS_DEPLOYMENT_TARGET=17.0 \
-            ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
-            build
+          set -o pipefail
+          for T in ZontesRider ZontesMinimal; do
+            echo "════════ 构建 $T ════════"
+            xcodebuild \
+              -project ZontesRider.xcodeproj \
+              -scheme "$T" \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath build/DerivedData \
+              CODE_SIGNING_ALLOWED=NO \
+              IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+              ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=YES \
+              build 2>&1 | tail -25
+          done
 
-      - name: Verify bundle
+      - name: Verify bundles
         run: |
-          APP="build/DerivedData/Build/Products/Release-iphoneos/ZontesRider.app"
-          echo "== .app 内容 =="
-          ls -la "$APP"
-          echo "== 嵌入的 Swift 运行时 =="
-          ls -la "$APP/Frameworks" 2>/dev/null || echo "（没有 Frameworks 目录）"
-          echo "== 版本 / 最低系统 =="
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist"
-          echo "== 二进制架构 =="
-          lipo -info "$APP/ZontesRider" 2>/dev/null || file "$APP/ZontesRider"
+          for T in ZontesRider ZontesMinimal; do
+            APP="build/DerivedData/Build/Products/Release-iphoneos/$T.app"
+            echo "════════ $T ════════"
+            ls -la "$APP"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleSupportedPlatforms" "$APP/Info.plist" || true
+            /usr/libexec/PlistBuddy -c "Print :LSRequiresIPhoneOS" "$APP/Info.plist" || true
+            lipo -info "$APP/$T" 2>/dev/null || file "$APP/$T"
+          done
 
-      - name: Package unsigned IPA
+      - name: Package unsigned IPAs
         run: |
-          mkdir -p build/Payload
-          cp -r "build/DerivedData/Build/Products/Release-iphoneos/ZontesRider.app" build/Payload/
+          set -e
           cd build
-          zip -r -q ZontesRider-unsigned.ipa Payload
-          ls -lh ZontesRider-unsigned.ipa
+          for T in ZontesRider ZontesMinimal; do
+            rm -rf pkg && mkdir -p pkg/Payload
+            cp -r "DerivedData/Build/Products/Release-iphoneos/$T.app" pkg/Payload/
+            (cd pkg && zip -r -q "../$T-unsigned.ipa" Payload)
+            ls -lh "$T-unsigned.ipa"
+          done
 
-      - name: Upload IPA artifact
+      - name: Upload ZontesRider IPA
         uses: actions/upload-artifact@v4
         with:
           name: ZontesRider-unsigned-ipa
           path: build/ZontesRider-unsigned.ipa
+          retention-days: 30
+
+      - name: Upload ZontesMinimal IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZontesMinimal-unsigned-ipa
+          path: build/ZontesMinimal-unsigned.ipa
           retention-days: 30

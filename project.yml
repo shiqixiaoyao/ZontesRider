@@ -2,6 +2,9 @@ name: ZontesRider
 options:
   bundleIdPrefix: com.shiqixiaoyao
 targets:
+  # ─────────────────────────────────────────────────────────────
+  # 主包
+  # ─────────────────────────────────────────────────────────────
   ZontesRider:
     type: application
     platform: iOS
@@ -16,8 +19,12 @@ targets:
         CFBundleDisplayName: 升仕车机
         # 版本号写死：XcodeGen 不会把 MARKETING_VERSION 自动写进 Info.plist，
         # 之前包内一直是 SDK 默认的 1.0/1，装完根本分不清装的是哪一版。
-        CFBundleShortVersionString: "0.2.3"
-        CFBundleVersion: "9"
+        CFBundleShortVersionString: "0.2.4"
+        CFBundleVersion: "10"
+        # Xcode 的 iOS 模板里必有这两项，此前工程一直缺。
+        # LSRequiresIPhoneOS 缺失会让包的"这是 iPhone 应用"身份不完整，
+        # 部分装机工具/系统版本上会在启动校验阶段直接判死。
+        LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         # 把沙盒 Documents 暴露给系统「文件」App：
         # 自签包拿不到控制台，闪退时用户可以直接在「文件」App 里读
@@ -40,14 +47,43 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shiqixiaoyao.zontesrider
         SWIFT_VERSION: "5.0"
-        MARKETING_VERSION: "0.2.3"
-        CURRENT_PROJECT_VERSION: "9"
+        MARKETING_VERSION: "0.2.4"
+        CURRENT_PROJECT_VERSION: "10"
         TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
-        # ↓↓↓ 抗闪退关键 1/2：把 Swift 运行时随包带。
-        # 用较新 Xcode（SDK iOS 26）编译、部署目标却是 iOS 17 时，二进制里对
+        # 抗闪退关键：把 Swift 运行时随包带。
+        # 用较新 Xcode 编译、部署目标却是旧系统时，二进制里对
         # /usr/lib/swift/libswiftCore.dylib 等是**绝对路径**引用，会去加载**系统**的那份；
         # 若编译器在新系统符号上产生强引用，旧 iOS 上就是 dyld 失败 → 点开图标即闪退。
-        # 打开此项后 linker 改用 @rpath 引用并把 libswift*.dylib 嵌进 .app/Frameworks，
-        # 符号由 App 自带，不再依赖设备系统版本。
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: "YES"
+
+  # ─────────────────────────────────────────────────────────────
+  # 最小复现包：零依赖，只用来判定"是代码还是签名链路"
+  # ─────────────────────────────────────────────────────────────
+  ZontesMinimal:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ZontesMinimal
+        excludes:
+          - "Info.plist"
+    info:
+      path: ZontesMinimal/Info.plist
+      properties:
+        CFBundleDisplayName: 升仕体检
+        CFBundleShortVersionString: "0.0.1"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shiqixiaoyao.zontesminimal
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
