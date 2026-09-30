@@ -27,11 +27,17 @@ public final class DashboardViewModel {
 
     /// 车机蓝牙是否在线（由 DashboardView 从 BLESession 投影进来）
     public var bleReady = false
+    /// 正在拉云端车况（用于按钮态）
+    public var isRefreshing = false
+    /// 最近一次拉取失败原因（UI 直接显示，避免「静默不刷新」）
+    public var loadError: String?
     /// 云端数据是否可用（未登录时为 false，界面展示演示数据）
     public var usesCloudData: Bool { provider != nil }
 
     private var sender: (any ControlCommandSending)?
-    private let provider: (any TelemetryProvider)?
+    /// 可后绑定：登录完成 / 换车后由容器注入云端数据源。
+    /// 上一版是 let，导致「视图先以未登录形态创建 → 拿到无数据源 VM → 登录后仍不刷新」。
+    private var provider: (any TelemetryProvider)?
     private var pollTask: Task<Void, Never>?
     private var bannerTask: Task<Void, Never>?
 
@@ -50,6 +56,21 @@ public final class DashboardViewModel {
     /// 登录态 / 换车后回填真实控车通道
     public func attach(sender: any ControlCommandSending) {
         self.sender = sender
+    }
+
+    /// 登录态变化时注入/替换云端数据源。重复注入同一来源是幂等的。
+    @MainActor
+    public func bind(provider: any TelemetryProvider) {
+        self.provider = provider
+    }
+
+    /// 退出登录：摘掉数据源并停轮询，界面回落演示数据
+    @MainActor
+    public func unbindProvider() {
+        stopPolling()
+        provider = nil
+        loadError = nil
+        connection = .disconnected
     }
 
     public struct Banner: Identifiable, Sendable {
@@ -94,11 +115,15 @@ public final class DashboardViewModel {
     @MainActor
     public func refresh() async {
         guard let provider else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         do {
             let t = try await provider.fetchTelemetry()
             telemetry = t
+            loadError = nil
             connection = .connected(rssi: t.tboxSignal.map { -115 + $0 * 10 } ?? -70)
         } catch {
+            loadError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             connection = .disconnected
         }
     }
@@ -223,7 +248,27 @@ public struct DashboardView: View {
                     .foregroundStyle(SovietPalette.textMuted)
             }
             Spacer()
-            ConnectionBadge(state: viewModel.connection)
+            VStack(alignment: .trailing, spacing: 7) {
+                ConnectionBadge(state: viewModel.connection)
+                if viewModel.usesCloudData {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        Task { await viewModel.refresh() }
+                    } label: {
+                        Text(viewModel.isRefreshing ? "拉取中…" : "刷新车况")
+                            .font(.soviet(10))
+                            .tracking(1)
+                            .foregroundStyle(SovietPalette.textSecondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .overlay {
+                                Rectangle().stroke(SovietPalette.textMuted, lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isRefreshing)
+                }
+            }
         }
     }
 
@@ -316,7 +361,9 @@ public struct DashboardView: View {
                         systemImage: action.systemImage,
                         tint: action.tint,
                         isBusy: viewModel.busyAction == action,
-                        isEnabled: viewModel.isConnected
+                        // 控车走蓝牙，不依赖云端连通性：按钮恒可点，
+                        // 失败时由链路层如实报错，避免「云端一断按钮就点不动」的误导
+                        isEnabled: viewModel.busyAction == nil
                     ) {
                         if action.needsConfirmation {
                             pendingConfirm = action
@@ -361,6 +408,19 @@ public struct DashboardView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 11)
         .constructivistCard(cut: 8, borderColor: SovietPalette.black, borderWidth: 2)
+        .overlay(alignment: .bottomLeading) {
+            // 拉取失败必须显性化，否则用户只会看到「一直不刷新」
+            if let e = viewModel.loadError {
+                Text("云端拉取失败：\(e)")
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.danger)
+                    .lineLimit(2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(SovietPalette.castIron)
+                    .offset(y: 2)
+            }
+        }
     }
 
     private static let timeFormatter: DateFormatter = {

@@ -126,23 +126,34 @@ private struct SafeModeBanner: View {
 }
 
 // MARK: - 仪表工段容器（登录态决定真实/演示数据）
+//
+// ⚠️ 这里刻意**不做 if/else 分支建 View**：
+//   上一版写 `if auth.isLoggedIn { DashboardView(viewModel: VM(provider: auth)) } else { DashboardView() }`，
+//   两个分支产出同类型视图，SwiftUI 复用 @State 时可能留下「没有数据源的 VM」，
+//   表现就是「登录后车况一直不刷新」。现在容器自己持有唯一 VM，
+//   登录态一变就用 task(id:) 注入数据源并启动轮询，与视图身份无关。
 
 private struct DashboardContainer: View {
     @Environment(AuthStore.self) private var auth
-    let ble: BLESession
+    let ble: BLESession?
+
+    @State private var model = DashboardViewModel(connection: .connecting)
 
     var body: some View {
-        if auth.isLoggedIn {
-            DashboardView(
-                viewModel: DashboardViewModel(
-                    connection: .connecting,
-                    provider: CloudTelemetryProvider(auth: auth)
-                ),
-                ble: ble
-            )
-        } else {
-            DashboardView()
-        }
+        DashboardView(viewModel: model, ble: ble)
+            .task(id: auth.isLoggedIn) {
+                if auth.isLoggedIn {
+                    model.bind(provider: CloudTelemetryProvider(auth: auth))
+                    model.startPolling()
+                } else {
+                    model.unbindProvider()
+                }
+            }
+            .onChange(of: auth.activePKECode) { _, _ in
+                // 换车：立即用新车钥匙拉一次，不等下一个轮询周期
+                guard auth.isLoggedIn else { return }
+                Task { await model.refresh() }
+            }
     }
 }
 
