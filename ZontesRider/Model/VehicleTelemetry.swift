@@ -27,7 +27,7 @@ public struct RawTelemetry: Decodable {
     public static let speedSentinel: Double = 4_000_000
 
     public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: Self.CodingKeys)
+        let c = try decoder.container(keyedBy: RawTelemetry.CodingKeys)
 
         func int(_ keys: [CodingKeys]) -> Int? {
             for k in keys {
@@ -74,15 +74,15 @@ public struct RawTelemetry: Decodable {
         case voltage, voltageAlt = "Voltage"
         case oil, oilAlt = "Oil", oilPercent = "oilPercent"
         case range, rangeAlt = "Range"
-        case totalMileage, totalMileageAlt = "TotalMileage"
+        case totalMileage, totalMileageAlt = "odomileages"
         case speed, speedAlt = "Speed"
-        case frontTire, frontTireAlt = "frontTirePressure"
-        case rearTire, rearTireAlt = "rearTirePressure"
+        case frontTire, frontTireAlt = "pressureFront"
+        case rearTire, rearTireAlt = "pressureRear"
         case frontTireRate, frontTireRateAlt = "frontRated"
         case rearTireRate, rearTireRateAlt = "rearRated"
-        case satellite, satelliteAlt = "satelliteCount"
-        case tboxSignal, tboxSignalAlt = "tboxSignal"
-        case lockState, lockStateAlt = "LockState"
+        case satellite, satelliteAlt = "satelliteNum"
+        case tboxSignal, tboxSignalAlt = "gsmrssi"
+        case lockState, lockStateAlt = "lock"
         case faultCode, faultCodeAlt = "FaultCode"
         case changeTime, changeTimeAlt = "ChangeTime"
         case isShowOilTankAndSeatCushion, tankFlag = "isShowOilTankAndSeatCushionFlag"

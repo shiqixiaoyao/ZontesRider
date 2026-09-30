@@ -18,7 +18,6 @@ public struct MockCommandSender: ControlCommandSending {
 
 // MARK: - ViewModel
 
-@MainActor
 @Observable
 public final class DashboardViewModel {
     public var telemetry: VehicleTelemetry
@@ -28,7 +27,7 @@ public final class DashboardViewModel {
 
     private let sender: any ControlCommandSending
 
-    public nonisolated init(
+    public init(
         telemetry: VehicleTelemetry = .sample,
         connection: ConnectionBadge.State = .connected(rssi: -62),
         sender: any ControlCommandSending = MockCommandSender()
@@ -56,6 +55,7 @@ public final class DashboardViewModel {
             : [.unlock, .lock, .findVehicle, .arm]
     }
 
+    @MainActor
     public func send(_ action: ControlAction) async {
         guard busyAction == nil else { return }
         busyAction = action
