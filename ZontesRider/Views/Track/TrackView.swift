@@ -249,18 +249,18 @@ public struct TrackView: View {
                     .font(.soviet(11))
                     .foregroundStyle(SovietPalette.textMuted)
             } else {
-                ForEach(Array(samples.enumerated()), id: \.offset) { _, p in
+                ForEach(samples) { row in
                     HStack(spacing: 8) {
-                        Text(p.timestamp.map { Self.clock.string(from: $0) } ?? "--")
+                        Text(row.point.timestamp.map { Self.clock.string(from: $0) } ?? "--")
                             .font(.soviet(10))
                             .monospacedDigit()
                             .foregroundStyle(SovietPalette.textSecondary)
-                        Text(String(format: "%.4f, %.4f", p.latitude, p.longitude))
+                        Text(String(format: "%.4f, %.4f", row.point.latitude, row.point.longitude))
                             .font(.soviet(10))
                             .monospacedDigit()
                             .foregroundStyle(SovietPalette.brassPale)
                         Spacer()
-                        Text(p.speed.map { String(format: "%.0f km/h", $0) } ?? "—")
+                        Text(row.point.speed.map { String(format: "%.0f km/h", $0) } ?? "—")
                             .font(.soviet(10))
                             .foregroundStyle(SovietPalette.textMuted)
                     }
@@ -273,13 +273,15 @@ public struct TrackView: View {
     }
 
     /// 最多 8 个等距采样点
-    private func sampled() -> [TrackPoint] {
+    private func sampled() -> [SampleRow] {
         let v = viewModel.points
-        guard v.count > 8 else { return v }
+        guard v.count > 8 else {
+            return v.enumerated().map { SampleRow(index: $0.offset, point: $0.element) }
+        }
         let step = Double(v.count - 1) / 7
         return (0..<8).compactMap { i in
             let idx = Int((Double(i) * step).rounded())
-            return idx < v.count ? v[idx] : nil
+            return idx < v.count ? SampleRow(index: idx, point: v[idx]) : nil
         }
     }
 
@@ -312,6 +314,13 @@ public struct TrackView: View {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+}
+
+/// 采样行（元组不能做 ForEach 的 id keyPath，包一层）
+private struct SampleRow: Identifiable {
+    let index: Int
+    let point: TrackPoint
+    var id: Int { index }
 }
 
 // MARK: - 折线绘制（经纬度 → 等比投影）
