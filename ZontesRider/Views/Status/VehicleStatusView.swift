@@ -39,6 +39,7 @@ public struct VehicleStatusView: View {
             VStack(spacing: 14) {
                 if let t = telemetry {
                     identityCard(t)
+                    cloudCard
                     readingsGrid(t)
                     tireCard(t)
                     signalCard(t)
@@ -99,6 +100,55 @@ public struct VehicleStatusView: View {
         }
         .padding(14)
         .constructivistCard()
+    }
+
+    /// 云端链路自检：这一屏用来回答「是不是真的连着升仕后台」
+    private var cloudCard: some View {
+        let h = auth.health
+        return VStack(alignment: .leading, spacing: 8) {
+            SovietSectionLabel("云端链路自检")
+            row("网关", "www.ifino.com:8081/zontespkeapp/api")
+            row("接口", "getHomeData（真实车况）")
+            row("车辆 PKE", auth.activePKECode ?? "—")
+            HStack {
+                Text("链路状态")
+                    .font(.soviet(11))
+                    .foregroundStyle(SovietPalette.textMuted)
+                Spacer()
+                Text(h.ok ? "已接通" : (h.lastError ?? "未探测"))
+                    .font(.soviet(11))
+                    .foregroundStyle(h.ok ? SovietPalette.ok : SovietPalette.danger)
+                    .lineLimit(1)
+            }
+            if let at = h.lastSuccessAt {
+                HStack {
+                    Text("最近成功")
+                        .font(.soviet(11))
+                        .foregroundStyle(SovietPalette.textMuted)
+                    Spacer()
+                    Text(Self.clock.string(from: at))
+                        .font(.soviet(11))
+                        .monospacedDigit()
+                        .foregroundStyle(SovietPalette.textSecondary)
+                }
+            }
+        }
+        .padding(14)
+        .constructivistCard(borderColor: SovietPalette.black)
+    }
+
+    private func row(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k)
+                .font(.soviet(11))
+                .foregroundStyle(SovietPalette.textMuted)
+            Spacer()
+            Text(v)
+                .font(.soviet(11))
+                .foregroundStyle(SovietPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
     }
 
     private func readingsGrid(_ t: VehicleTelemetry) -> some View {

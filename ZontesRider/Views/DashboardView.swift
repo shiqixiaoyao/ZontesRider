@@ -8,7 +8,7 @@ public protocol ControlCommandSending: Sendable {
     func send(_ action: ControlAction) async throws
 }
 
-/// 模拟发送：延迟 700ms 后成功，等价于一次蓝牙往返
+/// 模拟发送：延迟 700ms 后成功，等价于一次蓝牙往返（仅预览 / 无真车演示用）
 public struct MockCommandSender: ControlCommandSending {
     public init() {}
     public func send(_ action: ControlAction) async throws {
@@ -25,20 +25,31 @@ public final class DashboardViewModel {
     public var busyAction: ControlAction?
     public var banner: Banner?
 
-    private let sender: any ControlCommandSending
+    /// 车机蓝牙是否在线（由 DashboardView 从 BLESession 投影进来）
+    public var bleReady = false
+    /// 云端数据是否可用（未登录时为 false，界面展示演示数据）
+    public var usesCloudData: Bool { provider != nil }
+
+    private var sender: (any ControlCommandSending)?
     private let provider: (any TelemetryProvider)?
     private var pollTask: Task<Void, Never>?
+    private var bannerTask: Task<Void, Never>?
 
     public init(
         telemetry: VehicleTelemetry = .sample,
         connection: ConnectionBadge.State = .connected(rssi: -62),
-        sender: any ControlCommandSending = MockCommandSender(),
+        sender: (any ControlCommandSending)? = nil,
         provider: (any TelemetryProvider)? = nil
     ) {
         self.telemetry = telemetry
         self.connection = connection
         self.sender = sender
         self.provider = provider
+    }
+
+    /// 登录态 / 换车后回填真实控车通道
+    public func attach(sender: any ControlCommandSending) {
+        self.sender = sender
     }
 
     public struct Banner: Identifiable, Sendable {
@@ -92,19 +103,38 @@ public final class DashboardViewModel {
         }
     }
 
+    // MARK: 控车
+
     @MainActor
     public func send(_ action: ControlAction) async {
         guard busyAction == nil else { return }
         busyAction = action
         defer { busyAction = nil }
 
+        guard let sender else {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showBanner("控车通道未就绪：请先登录并靠近车辆连接车机蓝牙", isError: true)
+            return
+        }
+
         do {
             try await sender.send(action)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            banner = Banner(text: "\(action.title)已执行", isError: false)
+            showBanner("\(action.title)指令已送达车机", isError: false)
         } catch {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
-            banner = Banner(text: "\(action.title)失败：\(error.localizedDescription)", isError: true)
+            let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            showBanner("\(action.title)失败：\(msg)", isError: true)
+        }
+    }
+
+    @MainActor
+    private func showBanner(_ text: String, isError: Bool) {
+        banner = Banner(text: text, isError: isError)
+        bannerTask?.cancel()
+        bannerTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await MainActor.run { self?.banner = nil }
         }
     }
 }
@@ -114,9 +144,11 @@ public final class DashboardViewModel {
 public struct DashboardView: View {
     @State private var viewModel: DashboardViewModel
     @State private var pendingConfirm: ControlAction?
+    private let ble: BLESession?
 
-    public init(viewModel: DashboardViewModel = DashboardViewModel()) {
+    public init(viewModel: DashboardViewModel = DashboardViewModel(), ble: BLESession? = nil) {
         _viewModel = State(initialValue: viewModel)
+        self.ble = ble
     }
 
     public var body: some View {
@@ -143,8 +175,14 @@ public struct DashboardView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { viewModel.startPolling() }
+        .onAppear {
+            if let ble { viewModel.attach(sender: BLEGateway(session: ble)) }
+            viewModel.startPolling()
+        }
         .onDisappear { viewModel.stopPolling() }
+        .onChange(of: ble?.linkState) { _, newValue in
+            viewModel.bleReady = (newValue == .ready)
+        }
         .alert(item: $pendingConfirm) { action in
             Alert(
                 title: Text("确认\(action.title)？"),
@@ -258,6 +296,15 @@ public struct DashboardView: View {
                     .foregroundStyle(SovietPalette.textFaint)
             }
 
+            if let ble {
+                BLELinkRow(session: ble)
+            } else {
+                Text("演示数据 · 控车需登录并连接车机蓝牙")
+                    .font(.soviet(10))
+                    .foregroundStyle(SovietPalette.textFaint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), spacing: 9), count: 3),
                 spacing: 9
@@ -278,6 +325,13 @@ public struct DashboardView: View {
                     }
                 }
             }
+
+            Text("控车指令经蓝牙明文通道直发车机（需靠近车辆）。云端无 REST 控车端点，"
+                 + "官方签名帧体系未破解，故离线控车为唯一可行路径。")
+                .font(.soviet(9))
+                .foregroundStyle(SovietPalette.textFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -295,9 +349,9 @@ public struct DashboardView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text("最后上报")
+                Text(viewModel.usesCloudData ? "云端上报" : "演示数据")
                     .font(.soviet(11))
-                    .foregroundStyle(SovietPalette.textMuted)
+                    .foregroundStyle(viewModel.usesCloudData ? SovietPalette.ok : SovietPalette.textMuted)
                 Text(Self.timeFormatter.string(from: viewModel.telemetry.updatedAt ?? Date()))
                     .font(.soviet(12))
                     .foregroundStyle(SovietPalette.textSecondary)
@@ -314,6 +368,52 @@ public struct DashboardView: View {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+}
+
+// MARK: - 蓝牙链路状态条
+
+private struct BLELinkRow: View {
+    let session: BLESession
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(session.isReady ? SovietPalette.ok : SovietPalette.danger)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("车机蓝牙 · \(session.linkLabel)")
+                    .font(.soviet(11))
+                    .foregroundStyle(SovietPalette.textSecondary)
+                if let e = session.lastError, !session.isReady {
+                    Text(e)
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.danger)
+                        .lineLimit(1)
+                } else if let r = session.rssi {
+                    Text("RSSI \(r) dBm")
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.textFaint)
+                }
+            }
+            Spacer()
+            Button {
+                Task { try? await session.connect() }
+            } label: {
+                Text(session.isReady ? "重连" : "连接车机")
+                    .font(.soviet(11))
+                    .tracking(1)
+                    .foregroundStyle(SovietPalette.castIron)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(SovietPalette.brass)
+                    .border(SovietPalette.black, width: 2)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .constructivistCard(cut: 6, borderColor: SovietPalette.black, borderWidth: 2)
+    }
 }
 
 // MARK: - 预览

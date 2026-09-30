@@ -41,20 +41,19 @@ public enum AppTab: Int, CaseIterable, Identifiable {
 public struct RootView: View {
     @Environment(AuthStore.self) private var auth
     @State private var selection: AppTab = .dashboard
+    /// 全局唯一蓝牙会话：控车指令经它下发给车机（pkeCode 随选中车辆重建）
+    @State private var ble = BLESession(pkeCode: "")
 
-    public init() {}
+    // BLESession 是 MainActor 隔离类型，init 必须在主线程上下文求值
+    @MainActor public init() {}
 
     public var body: some View {
         TabView(selection: $selection) {
-            DashboardContainer()
+            DashboardContainer(ble: ble)
                 .tag(AppTab.dashboard)
 
-            SovietPlaceholderView(
-                title: "轨迹工段",
-                subtitle: "骑行轨迹 · GPS 回放 · 路线归档",
-                milestone: "待接入：CoreLocation 轨迹记录"
-            )
-            .tag(AppTab.track)
+            TrackView()
+                .tag(AppTab.track)
 
             FuelTrackerView()
                 .tag(AppTab.fuel)
@@ -70,6 +69,12 @@ public struct RootView: View {
             SovietTabBar(selection: $selection)
         }
         .tint(SovietPalette.brass)
+        .task {
+            ble.reconfigure(pkeCode: auth.activePKECode ?? "")
+        }
+        .onChange(of: auth.activePKECode) { _, newValue in
+            ble.reconfigure(pkeCode: newValue ?? "")
+        }
     }
 }
 
@@ -77,6 +82,7 @@ public struct RootView: View {
 
 private struct DashboardContainer: View {
     @Environment(AuthStore.self) private var auth
+    let ble: BLESession
 
     var body: some View {
         if auth.isLoggedIn {
@@ -84,7 +90,8 @@ private struct DashboardContainer: View {
                 viewModel: DashboardViewModel(
                     connection: .connecting,
                     provider: CloudTelemetryProvider(auth: auth)
-                )
+                ),
+                ble: ble
             )
         } else {
             DashboardView()
