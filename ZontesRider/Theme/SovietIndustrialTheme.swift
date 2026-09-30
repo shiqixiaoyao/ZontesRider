@@ -19,6 +19,11 @@ public enum SovietPalette {
     public static let textMuted     = Color(hex: 0x8A8D92)
     public static let textFaint     = Color(hex: 0x5A5C62)
     public static let black         = Color(hex: 0x000000)
+
+    // 语义色（指示灯 / 正文）
+    public static let danger        = Color(hex: 0xC62F2F)   // 告警红 = 指示灯亮
+    public static let ok            = Color(hex: 0x6B8E4E)   // 军绿（在线/正常）
+    public static let textPrimary   = Color(hex: 0xE8E2D0)   // 米白正文
 }
 
 // MARK: - 字体

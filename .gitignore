@@ -11,3 +11,6 @@ _reverse/
 # 其他
 .DS_Store
 *.ipa
+.workbuddy/
+build-output/
+build-output-artifact.zip

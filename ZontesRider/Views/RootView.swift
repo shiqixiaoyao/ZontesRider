@@ -39,13 +39,14 @@ public enum AppTab: Int, CaseIterable, Identifiable {
 /// App 根视图：系统 TabView 管状态，机械 tab 栏管外观。
 /// 工段顺序：仪表 / 轨迹 / 油耗 / 车况 / 我的（油耗嵌在轨迹与车况之间）。
 public struct RootView: View {
+    @Environment(AuthStore.self) private var auth
     @State private var selection: AppTab = .dashboard
 
     public init() {}
 
     public var body: some View {
         TabView(selection: $selection) {
-            DashboardView()
+            DashboardContainer()
                 .tag(AppTab.dashboard)
 
             SovietPlaceholderView(
@@ -58,25 +59,36 @@ public struct RootView: View {
             FuelTrackerView()
                 .tag(AppTab.fuel)
 
-            SovietPlaceholderView(
-                title: "车况工段",
-                subtitle: "故障码详情 · 保养周期 · 胎压历史",
-                milestone: "待接入：getDataService 云端车况"
-            )
-            .tag(AppTab.status)
+            VehicleStatusView()
+                .tag(AppTab.status)
 
-            SovietPlaceholderView(
-                title: "我的工段",
-                subtitle: "账号 · 车辆绑定 · 外观与单位设置",
-                milestone: "待接入：ifino OAuth2 登录"
-            )
-            .tag(AppTab.profile)
+            ProfileView()
+                .tag(AppTab.profile)
         }
         .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             SovietTabBar(selection: $selection)
         }
         .tint(SovietPalette.brass)
+    }
+}
+
+// MARK: - 仪表工段容器（登录态决定真实/演示数据）
+
+private struct DashboardContainer: View {
+    @Environment(AuthStore.self) private var auth
+
+    var body: some View {
+        if auth.isLoggedIn {
+            DashboardView(
+                viewModel: DashboardViewModel(
+                    connection: .connecting,
+                    provider: CloudTelemetryProvider(auth: auth)
+                )
+            )
+        } else {
+            DashboardView()
+        }
     }
 }
 
@@ -187,6 +199,7 @@ public struct SovietPlaceholderView: View {
 
 #Preview("根框架 · 默认仪表") {
     RootView()
+        .environment(AuthStore())
         .modelContainer(FuelEntry.previewContainer)
 }
 

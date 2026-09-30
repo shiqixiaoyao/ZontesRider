@@ -26,15 +26,19 @@ public final class DashboardViewModel {
     public var banner: Banner?
 
     private let sender: any ControlCommandSending
+    private let provider: (any TelemetryProvider)?
+    private var pollTask: Task<Void, Never>?
 
     public init(
         telemetry: VehicleTelemetry = .sample,
         connection: ConnectionBadge.State = .connected(rssi: -62),
-        sender: any ControlCommandSending = MockCommandSender()
+        sender: any ControlCommandSending = MockCommandSender(),
+        provider: (any TelemetryProvider)? = nil
     ) {
         self.telemetry = telemetry
         self.connection = connection
         self.sender = sender
+        self.provider = provider
     }
 
     public struct Banner: Identifiable, Sendable {
@@ -53,6 +57,39 @@ public final class DashboardViewModel {
         telemetry.supportsSeatAndTank
             ? ControlAction.allCases
             : [.unlock, .lock, .findVehicle, .arm]
+    }
+
+    // MARK: 车况轮询（provider 存在时生效）
+
+    /// 立即拉一次，随后每 interval 秒轮询。重复调用安全（先取消旧任务）。
+    @MainActor
+    public func startPolling(interval: TimeInterval = 20) {
+        guard provider != nil else { return }
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refresh()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+    }
+
+    @MainActor
+    public func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    @MainActor
+    public func refresh() async {
+        guard let provider else { return }
+        do {
+            let t = try await provider.fetchTelemetry()
+            telemetry = t
+            connection = .connected(rssi: t.tboxSignal.map { -115 + $0 * 10 } ?? -70)
+        } catch {
+            connection = .disconnected
+        }
     }
 
     @MainActor
@@ -106,6 +143,8 @@ public struct DashboardView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear { viewModel.startPolling() }
+        .onDisappear { viewModel.stopPolling() }
         .alert(item: $pendingConfirm) { action in
             Alert(
                 title: Text("确认\(action.title)？"),
