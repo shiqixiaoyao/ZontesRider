@@ -16,9 +16,14 @@ targets:
         CFBundleDisplayName: 升仕车机
         # 版本号写死：XcodeGen 不会把 MARKETING_VERSION 自动写进 Info.plist，
         # 之前包内一直是 SDK 默认的 1.0/1，装完根本分不清装的是哪一版。
-        CFBundleShortVersionString: "0.2.2"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "0.2.3"
+        CFBundleVersion: "9"
         UILaunchScreen: {}
+        # 把沙盒 Documents 暴露给系统「文件」App：
+        # 自签包拿不到控制台，闪退时用户可以直接在「文件」App 里读
+        # launch.phase.txt / last-crash.txt，不需要 App 能启动。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:
@@ -35,8 +40,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shiqixiaoyao.zontesrider
         SWIFT_VERSION: "5.0"
-        MARKETING_VERSION: "0.2.2"
-        CURRENT_PROJECT_VERSION: "8"
+        MARKETING_VERSION: "0.2.3"
+        CURRENT_PROJECT_VERSION: "9"
         TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         # ↓↓↓ 抗闪退关键 1/2：把 Swift 运行时随包带。

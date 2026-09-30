@@ -3,35 +3,30 @@ import UIKit
 
 // MARK: - 启动轨迹 / 崩溃留痕
 //
-// 自签包装到真机上没有 Xcode 控制台，闪退原因完全不可见。
-// 本工具做两件事：
-//   1. phase 标记：把「启动走到第几步」同步写进沙盒文件；
-//      进程被杀后文件还留着，下次启动一读就知道死在哪一段。
-//   2. 未捕获异常处理：UIKit / KVO / 数组越界等 NSException 的原因与栈顶落盘。
-//      （Swift 的 fatalError、强制解包 nil 不走这里，但配合 phase 足够定位。）
-//
-// 结果展示在「我的」工段的「启动诊断」卡里。
+// 自签包装到真机上没有 Xcode 控制台，闪退原因完全不可见。本工具负责三件事：
+//   1. phase 打点：把「启动走到第几步」同步写进沙盒 Documents。
+//      配合 Info.plist 的 UIFileSharingEnabled，用户**不用进 App**，
+//      直接在系统「文件」App → 我的 iPhone → 升仕车机 里就能读到；
+//   2. 未捕获异常：NSSetUncaughtExceptionHandler 把 NSException 的原因与栈顶落盘；
+//   3. 启动尝试计数：连续两次没跑到 stable，下次直接进裸诊断界面。
+//      —— SwiftData 的 fatalError、Swift 强制解包 nil 都不走 NSException，
+//      光靠 1/2 抓不到，所以必须有「起不来也要能进 App 看诊断」这条兜底路径。
 
 // 全局常量：C 函数指针闭包不能捕获上下文，只能引用全局
-private let zrCrashURL: URL = {
+private let zrDocsURL: URL = {
     let fm = FileManager.default
-    let dir = (try? fm.url(for: .documentDirectory, in: .userDomainMask,
-                           appropriateFor: nil, create: true))
+    return (try? fm.url(for: .documentDirectory, in: .userDomainMask,
+                        appropriateFor: nil, create: true))
         ?? URL(fileURLWithPath: NSTemporaryDirectory())
-    return dir.appendingPathComponent("last-crash.txt")
 }()
 
-private let zrPhaseURL: URL = {
-    let fm = FileManager.default
-    let dir = (try? fm.url(for: .documentDirectory, in: .userDomainMask,
-                           appropriateFor: nil, create: true))
-        ?? URL(fileURLWithPath: NSTemporaryDirectory())
-    return dir.appendingPathComponent("launch.phase.txt")
-}()
+private let zrCrashURL = zrDocsURL.appendingPathComponent("last-crash.txt")
+private let zrPhaseURL = zrDocsURL.appendingPathComponent("launch.phase.txt")
+private let zrAttemptKey = "zr.launch.attempts"
 
 public enum LaunchTrace {
 
-    /// 建议在 App init 里调用一次
+    /// 建议在 App init 里最先调用
     public static func install() {
         NSSetUncaughtExceptionHandler { ex in
             let text = """
@@ -39,7 +34,7 @@ public enum LaunchTrace {
             \(ex.reason ?? "（无 reason）")
 
             --- 栈顶 ---
-            \(ex.callStackSymbols.prefix(15).joined(separator: "\n"))
+            \(ex.callStackSymbols.prefix(20).joined(separator: "\n"))
             """
             try? text.data(using: .utf8)?.write(to: zrCrashURL, options: .atomic)
         }
@@ -49,6 +44,35 @@ public enum LaunchTrace {
     public static func mark(_ phase: String) {
         try? phase.data(using: .utf8)?.write(to: zrPhaseURL, options: .atomic)
     }
+
+    // MARK: - 启动尝试计数（连续失败兜底）
+
+    /// 启动时调用：本次算一次尝试
+    public static func beginLaunchAttempt() {
+        let n = UserDefaults.standard.integer(forKey: zrAttemptKey)
+        UserDefaults.standard.set(n + 1, forKey: zrAttemptKey)
+    }
+
+    /// 连续两次没跑起来 → 下次直接进裸诊断界面
+    public static var shouldEnterDiagnosticMode: Bool {
+        UserDefaults.standard.integer(forKey: zrAttemptKey) >= 2
+    }
+
+    /// 启动挂到 stable → 清零计数
+    public static func launchSucceeded() {
+        UserDefaults.standard.set(0, forKey: zrAttemptKey)
+    }
+
+    /// 用户点「重试正常启动」时用
+    public static func reset() {
+        UserDefaults.standard.set(0, forKey: zrAttemptKey)
+        try? FileManager.default.removeItem(at: zrCrashURL)
+        try? FileManager.default.removeItem(at: zrPhaseURL)
+    }
+
+    public static var attempts: Int { UserDefaults.standard.integer(forKey: zrAttemptKey) }
+
+    // MARK: - 读取
 
     public static var phase: String? {
         (try? String(contentsOf: zrPhaseURL, encoding: .utf8))?
