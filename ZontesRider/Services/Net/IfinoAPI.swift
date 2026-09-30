@@ -218,6 +218,21 @@ public actor IfinoAPIClient {
         return data
     }
 
+    /// 用 refreshToken 换新 accessToken（2026-10-01 实测端点可用，返回同构 TokenPayload）。
+    /// token 15 天过期，客户端靠它静默续期，避免把用户踢回登录页。
+    public func refreshToken(_ refreshToken: String) async throws -> TokenPayload {
+        let form: [(String, String)] = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refreshToken),
+            ("sys", "209"),
+            ("lang", "CH"),
+            ("brand", "升仕"),
+        ]
+        return try await request(
+            path: "/auth/oauth2/token", method: "POST", form: form, token: nil
+        )
+    }
+
     // MARK: 车辆列表
 
     public func getMyMotorList(token: String) async throws -> [MotorVehicle] {

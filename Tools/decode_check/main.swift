@@ -159,6 +159,19 @@ struct DecodeCheck {
             report.fail("login", failDetail(error))
         }
 
+        // ── 1b. refreshToken 续期（保持登录状态的关键路径）─────────
+        section("refreshToken 续期（token 过期不掉登录）")
+        let refreshBody = loadFixture(dir, "refresh.json")
+        FixtureProtocol.responder = { _ in (200, refreshBody) }
+        do {
+            let p = try await client.refreshToken("SANITIZED-REFRESH-TOKEN")
+            report.expectEq(p.accessToken, "eyJhbGciOiJSUzI1NiJ9.SANITIZED.fake-refreshed-token",
+                            "新 accessToken")
+            report.expect(p.refreshToken != nil, "轮换 refreshToken")
+        } catch {
+            report.fail("refreshToken", failDetail(error))
+        }
+
         // ── 2. 车辆列表 ────────────────────────────────────────────
         section("车辆列表（pkecode 全小写 / 字符串型胎压额定值）")
         FixtureProtocol.responder = { _ in (200, listBody) }

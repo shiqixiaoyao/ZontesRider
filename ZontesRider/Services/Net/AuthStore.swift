@@ -78,6 +78,7 @@ public final class AuthStore {
 
     public private(set) var state: State = .loggedOut
     public private(set) var token: String?
+    private var refreshToken: String?
     public private(set) var usercode: String?
     public private(set) var vehicles: [MotorVehicle] = []
 
@@ -100,10 +101,11 @@ public final class AuthStore {
     private let client = IfinoAPIClient()
 
     public init() {
-        // 冷启动恢复会话
+        // 冷启动恢复会话（refreshToken 一并恢复，token 过期时才能静默续期、不掉登录）
         if let t = KeychainHelper.read(account: "accessToken"),
            let u = KeychainHelper.read(account: "usercode") {
             token = t
+            refreshToken = KeychainHelper.read(account: "refreshToken")
             usercode = u
             selectedPKECode = KeychainHelper.read(account: "pkeCode")
             // 先摆上本地缓存，界面不用等网络就有车可显示（随后 refreshVehicles 覆盖）
@@ -137,9 +139,11 @@ public final class AuthStore {
         do {
             let payload = try await client.login(usercode: usercode, password: password)
             token = payload.accessToken
+            refreshToken = payload.refreshToken
             self.usercode = usercode
             KeychainHelper.save(payload.accessToken, account: "accessToken")
             KeychainHelper.save(usercode, account: "usercode")
+            if let rt = payload.refreshToken { KeychainHelper.save(rt, account: "refreshToken") }
             state = .loggedIn
             selectedPKECode = nil
             await refreshVehicles()
@@ -149,9 +153,50 @@ public final class AuthStore {
         }
     }
 
+    // MARK: 会话续期（保持登录状态的关键）
+
+    /// token 过期 / 服务端返回 401 时，先用 refreshToken 静默续期。
+    /// 续期成功 → 换上新的 accessToken + refreshToken，登录态不掉；
+    /// 续期也失败（refreshToken 一并过期）→ 才真正退出登录。
+    /// 并发安全：多个请求同时撞上 401 时，只允许一个发起续期，其余等待。
+    private var refreshTask: Task<Void, Never>?
+
+    public func ensureFreshToken() async -> Bool {
+        guard refreshToken != nil || usercode != nil else { return false }
+        // 已在续期中 → 等它结束
+        if let t = refreshTask {
+            await t.value
+            return token != nil
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                if let rt = self.refreshToken {
+                    let p = try await self.client.refreshToken(rt)
+                    self.token = p.accessToken
+                    if let nrt = p.refreshToken { self.refreshToken = nrt }
+                    KeychainHelper.save(p.accessToken, account: "accessToken")
+                    if let nrt = p.refreshToken { KeychainHelper.save(nrt, account: "refreshToken") }
+                    self.state = .loggedIn
+                } else {
+                    throw IfinoError.unauthorized
+                }
+            } catch {
+                // 续期失败：清登录凭据，但**保留本地数据缓存**
+                self.logout()
+            }
+        }
+        refreshTask = task
+        await task.value
+        refreshTask = nil
+        return token != nil
+    }
+
     // MARK: 车辆列表
 
-    public func refreshVehicles() async {
+    public func refreshVehicles() async { await refreshVehicles(retryAfterRefresh: true) }
+
+    private func refreshVehicles(retryAfterRefresh: Bool) async {
         guard let token else { return }
         do {
             let list = try await client.getMyMotorList(token: token)
@@ -172,7 +217,13 @@ public final class AuthStore {
         } catch let e as IfinoError {
             // 云端失败不清空已有的（缓存）车辆列表 —— 数据保留优先
             vehiclesFromCache = !vehicles.isEmpty
-            if case .unauthorized = e { logout(); return }
+            if case .unauthorized = e {
+                // token 过期：先静默续期，续期成功只重试一次（防无限递归）
+                if retryAfterRefresh, await ensureFreshToken() {
+                    await refreshVehicles(retryAfterRefresh: false)
+                }
+                return
+            }
             lastError = e.errorDescription
             health.lastError = e.errorDescription
         } catch {
@@ -224,7 +275,17 @@ public final class AuthStore {
         } catch let e as IfinoError {
             health.ok = false
             health.lastError = e.errorDescription
-            if case .unauthorized = e { logout() }
+            if case .unauthorized = e {
+                // 静默续期并重试一次，成功则本次请求照常返回（登录态不掉）
+                if await ensureFreshToken(), let nt = token, let np = activePKECode {
+                    let t = try await client.getHomeData(pkeCode: np, token: nt)
+                    health.lastSuccessAt = Date()
+                    health.lastError = nil
+                    health.ok = true
+                    LocalStore.saveTelemetry(t, pke: np)
+                    return t
+                }
+            }
             throw e
         } catch {
             health.ok = false
@@ -255,7 +316,20 @@ public final class AuthStore {
         } catch let e as IfinoError {
             health.ok = false
             health.lastError = e.errorDescription
-            if case .unauthorized = e { logout() }
+            if case .unauthorized = e {
+                // 静默续期并重试一次（轨迹可能已按天切窗并发，这里只重试整体）
+                if await ensureFreshToken(), let nt = token {
+                    let pts = try await client.getTrack(carCode: pke, startTime: start,
+                                                        endTime: end, token: nt,
+                                                        onProgress: onProgress)
+                    let valid = pts.filter { $0.isValid }
+                    LocalStore.saveTrack(valid, pke: pke, range: range)
+                    health.lastSuccessAt = Date()
+                    health.lastError = nil
+                    health.ok = true
+                    return valid
+                }
+            }
             throw e
         } catch {
             health.ok = false
@@ -271,6 +345,7 @@ public final class AuthStore {
     /// 真要清空请用 `clearLocalCache()`。
     public func logout() {
         token = nil
+        refreshToken = nil
         usercode = nil
         vehicles = []
         selectedPKECode = nil
@@ -279,6 +354,7 @@ public final class AuthStore {
         vehiclesFromCache = false
         vehiclesCachedAt = nil
         KeychainHelper.delete(account: "accessToken")
+        KeychainHelper.delete(account: "refreshToken")
         KeychainHelper.delete(account: "usercode")
         KeychainHelper.delete(account: "pkeCode")
     }

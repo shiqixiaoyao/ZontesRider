@@ -34,7 +34,14 @@ public struct VehicleStatusView: View {
         }
         // 用 task(id:) 而不是 task：登录态一变就重新拉，否则「先开 App 后登录」
         // 的用户切到本页会永远看到空白（task 只在首次出现时执行一次）
-        .task(id: auth.isLoggedIn) { await load() }
+        .task(id: auth.isLoggedIn) {
+            await load()
+            // 登录后每 15 秒自动刷新一次，做到「实时」（离开本页自动停止）
+            while auth.isLoggedIn && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await load()
+            }
+        }
         .preferredColorScheme(.dark)
     }
 
