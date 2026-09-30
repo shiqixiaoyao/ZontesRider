@@ -118,7 +118,8 @@ public struct TrackStats: Sendable, Equatable {
             durationMinutes = 0
         }
 
-        let speeds = valid.compactMap { $0.speed }.filter { $0 >= 0 && $0 < 1000 }
+        // 上限 400km/h：轨迹接口同样会下发哨兵车速，不能让它污染「最高车速」
+        let speeds = valid.compactMap { $0.speed }.filter { $0 >= 0 && $0 <= 400 }
         maxSpeed = speeds.max() ?? 0
         avgSpeed = speeds.isEmpty ? 0 : speeds.reduce(0, +) / Double(speeds.count)
 
@@ -160,6 +161,9 @@ public enum TrackRange: String, CaseIterable, Sendable, Identifiable {
         case .month: return 30
         }
     }
+
+    /// 本地缓存文件名用的稳定键（rawValue 是中文，不适合做文件名）
+    public var cacheKey: String { "\(days)d" }
 
     public func window(from now: Date = Date()) -> (start: Date, end: Date) {
         let cal = Calendar.current

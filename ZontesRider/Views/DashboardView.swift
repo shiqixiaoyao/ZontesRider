@@ -31,6 +31,12 @@ public final class DashboardViewModel {
     public var isRefreshing = false
     /// 最近一次拉取失败原因（UI 直接显示，避免「静默不刷新」）
     public var loadError: String?
+    /// 当前展示的是**本地缓存**（冷启动先摆缓存；实时失败时回落到缓存，而不是清空）
+    public var dataFromCache = false
+    /// 本地缓存落盘时间
+    public var cacheAt: Date?
+    /// 本次会话是否成功拿到过**实时**车况
+    public var hasLiveData = false
     /// 云端数据是否可用（未登录时为 false，界面展示演示数据）
     public var usesCloudData: Bool { provider != nil }
 
@@ -59,9 +65,21 @@ public final class DashboardViewModel {
     }
 
     /// 登录态变化时注入/替换云端数据源。重复注入同一来源是幂等的。
+    /// 绑定后立刻把**本地缓存**摆上屏：冷启动/断网也有车况可看，
+    /// 不用干等一次网络往返（拿到实时数据后会被 refresh 覆盖并去掉「缓存」标记）。
     @MainActor
     public func bind(provider: any TelemetryProvider) {
         self.provider = provider
+        guard let cache = provider as? TelemetryCaching else { return }
+        Task { [weak self] in
+            guard let snap = await cache.cachedTelemetry() else { return }
+            await MainActor.run {
+                guard let self, !self.hasLiveData else { return }
+                self.telemetry = snap.telemetry
+                self.dataFromCache = true
+                self.cacheAt = snap.at
+            }
+        }
     }
 
     /// 退出登录：摘掉数据源并停轮询，界面回落演示数据
@@ -70,6 +88,9 @@ public final class DashboardViewModel {
         stopPolling()
         provider = nil
         loadError = nil
+        dataFromCache = false
+        cacheAt = nil
+        hasLiveData = false
         connection = .disconnected
     }
 
@@ -121,10 +142,20 @@ public final class DashboardViewModel {
             let t = try await provider.fetchTelemetry()
             telemetry = t
             loadError = nil
+            dataFromCache = false
+            cacheAt = nil
+            hasLiveData = true
             connection = .connected(rssi: t.tboxSignal.map { -115 + $0 * 10 } ?? -70)
         } catch {
             loadError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             connection = .disconnected
+            // 实时失败 → 回落到本地缓存：数据保留优先，错误原因照旧显性显示
+            if !hasLiveData, let cache = provider as? TelemetryCaching,
+               let snap = await cache.cachedTelemetry() {
+                telemetry = snap.telemetry
+                dataFromCache = true
+                cacheAt = snap.at
+            }
         }
     }
 
@@ -250,6 +281,14 @@ public struct DashboardView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 7) {
                 ConnectionBadge(state: viewModel.connection)
+                if viewModel.dataFromCache, let at = viewModel.cacheAt {
+                    Text("本地缓存 · \(Self.timeFormatter.string(from: at))")
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.brass)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .overlay { Rectangle().stroke(SovietPalette.brass, lineWidth: 1) }
+                }
                 if viewModel.usesCloudData {
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -397,10 +436,12 @@ public struct DashboardView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text(viewModel.usesCloudData ? "云端上报" : "演示数据")
+                Text(viewModel.dataFromCache ? "本地缓存" : (viewModel.usesCloudData ? "云端上报" : "演示数据"))
                     .font(.soviet(11))
-                    .foregroundStyle(viewModel.usesCloudData ? SovietPalette.ok : SovietPalette.textMuted)
-                Text(Self.timeFormatter.string(from: viewModel.telemetry.updatedAt ?? Date()))
+                    .foregroundStyle(viewModel.dataFromCache
+                                     ? SovietPalette.brass
+                                     : (viewModel.usesCloudData ? SovietPalette.ok : SovietPalette.textMuted))
+                Text(Self.timeFormatter.string(from: viewModel.cacheAt ?? viewModel.telemetry.updatedAt ?? Date()))
                     .font(.soviet(12))
                     .foregroundStyle(SovietPalette.textSecondary)
             }

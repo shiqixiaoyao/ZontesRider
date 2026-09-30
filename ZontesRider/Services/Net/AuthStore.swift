@@ -80,6 +80,11 @@ public final class AuthStore {
     public private(set) var token: String?
     public private(set) var usercode: String?
     public private(set) var vehicles: [MotorVehicle] = []
+
+    /// 车辆列表当前是否来自本地缓存（尚未被云端刷新覆盖）
+    public private(set) var vehiclesFromCache = false
+    /// 本地缓存的落盘时间（「本地数据」卡片展示用）
+    public private(set) var vehiclesCachedAt: Date?
     public var selectedPKECode: String? {
         didSet {
             if let selectedPKECode, !selectedPKECode.isEmpty {
@@ -101,6 +106,12 @@ public final class AuthStore {
             token = t
             usercode = u
             selectedPKECode = KeychainHelper.read(account: "pkeCode")
+            // 先摆上本地缓存，界面不用等网络就有车可显示（随后 refreshVehicles 覆盖）
+            if let snap = LocalStore.loadVehicles(), !snap.vehicles.isEmpty {
+                vehicles = snap.vehicles
+                vehiclesFromCache = true
+                vehiclesCachedAt = snap.fetchedAt
+            }
             state = .loggedIn
             Task { await refreshVehicles() }
         }
@@ -152,14 +163,48 @@ public final class AuthStore {
             }
             lastError = nil
             health.lastPKECode = activePKECode
+            // 本地留存：下次冷启动/断网也能立刻显示车辆
+            if !list.isEmpty {
+                LocalStore.saveVehicles(list)
+                vehiclesFromCache = false
+                vehiclesCachedAt = Date()
+            }
         } catch let e as IfinoError {
+            // 云端失败不清空已有的（缓存）车辆列表 —— 数据保留优先
+            vehiclesFromCache = !vehicles.isEmpty
             if case .unauthorized = e { logout(); return }
             lastError = e.errorDescription
             health.lastError = e.errorDescription
         } catch {
+            vehiclesFromCache = !vehicles.isEmpty
             lastError = error.localizedDescription
             health.lastError = error.localizedDescription
         }
+    }
+
+    // MARK: 本地缓存读取（供 UI 冷启动先显示）
+
+    /// 上次成功落盘的车况（含落盘时间）。返回 nil 表示这台车还没成功拉过。
+    public func cachedTelemetry() -> (telemetry: VehicleTelemetry, at: Date)? {
+        guard let pke = activePKECode,
+              let snap = LocalStore.loadTelemetry(pke: pke) else { return nil }
+        return (snap.telemetry, snap.fetchedAt)
+    }
+
+    public func cachedTrack(range: TrackRange) -> (points: [TrackPoint], at: Date)? {
+        guard let pke = activePKECode else { return nil }
+        return LocalStore.loadTrack(pke: pke, range: range)
+    }
+
+    /// 「本地数据」卡片数据源
+    public func localCacheEntries() -> [LocalStore.Entry] { LocalStore.entries() }
+
+    /// 只清数据缓存，不动登录态（Keychain）
+    public func clearLocalCache() {
+        LocalStore.clearAll()
+        vehiclesFromCache = false
+        vehiclesCachedAt = nil
+        RawTrafficLog.clear()
     }
 
     // MARK: 实时车况（供 TelemetryProvider 调用）
@@ -173,6 +218,8 @@ public final class AuthStore {
             health.lastError = nil
             health.lastPKECode = pke
             health.ok = true
+            // 本地留存（用户诉求：数据要留下来，断网/解析失败时还能看到上次的车况）
+            LocalStore.saveTelemetry(t, pke: pke)
             return t
         } catch let e as IfinoError {
             health.ok = false
@@ -201,7 +248,10 @@ public final class AuthStore {
             health.lastSuccessAt = Date()
             health.lastError = nil
             health.ok = true
-            return pts.filter { $0.isValid }
+            let valid = pts.filter { $0.isValid }
+            // 按档位落盘：切回「今日/近7日/近30日」时先有折线，再等存量刷新
+            LocalStore.saveTrack(valid, pke: pke, range: range)
+            return valid
         } catch let e as IfinoError {
             health.ok = false
             health.lastError = e.errorDescription
@@ -216,6 +266,9 @@ public final class AuthStore {
 
     // MARK: 退出
 
+    /// 退出只清登录凭据（Keychain），**刻意保留本地数据缓存**：
+    /// 重新登录后立刻可见上次的车况/轨迹，不用从零等一轮全量拉取。
+    /// 真要清空请用 `clearLocalCache()`。
     public func logout() {
         token = nil
         usercode = nil
@@ -223,6 +276,8 @@ public final class AuthStore {
         selectedPKECode = nil
         state = .loggedOut
         health = CloudHealth()
+        vehiclesFromCache = false
+        vehiclesCachedAt = nil
         KeychainHelper.delete(account: "accessToken")
         KeychainHelper.delete(account: "usercode")
         KeychainHelper.delete(account: "pkeCode")

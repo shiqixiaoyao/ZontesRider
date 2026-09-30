@@ -7,6 +7,11 @@ public struct VehicleStatusView: View {
     @State private var telemetry: VehicleTelemetry?
     @State private var errorText: String?
     @State private var loading = false
+    /// 当前显示的是本地缓存（还没拿到实时数据，或实时失败后回落）
+    @State private var stale = false
+    @State private var cacheAt: Date?
+    @State private var cacheEntries: [LocalStore.Entry] = []
+    @State private var showTrace = false
 
     public init() {}
 
@@ -39,12 +44,17 @@ public struct VehicleStatusView: View {
     private var content: some View {
         ScrollView {
             VStack(spacing: 14) {
+                // 实时失败但手里有数据时：错误只占一条窄带，数据照常显示（数据保留优先）
+                if let errorText, telemetry != nil {
+                    inlineError(errorText)
+                }
                 if let t = telemetry {
                     identityCard(t)
                     cloudCard
                     readingsGrid(t)
                     tireCard(t)
                     signalCard(t)
+                    localDataCard
                     footerCard(t)
                 } else if loading {
                     ProgressView()
@@ -95,9 +105,18 @@ public struct VehicleStatusView: View {
                     .font(.soviet(12))
                     .tracking(1)
                     .foregroundStyle(t.lockState == .unlocked ? SovietPalette.redBright : SovietPalette.ok)
-                Text("更新于 \(t.updatedAt.map { Self.clock.string(from: $0) } ?? "--")")
-                    .font(.soviet(9))
-                    .foregroundStyle(SovietPalette.textFaint)
+                if stale, let at = cacheAt {
+                    Text("本地缓存 · \(Self.clock.string(from: at))")
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.brass)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .overlay { Rectangle().stroke(SovietPalette.brass, lineWidth: 1) }
+                } else {
+                    Text("更新于 \(t.updatedAt.map { Self.clock.string(from: $0) } ?? "--")")
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.textFaint)
+                }
             }
         }
         .padding(14)
@@ -120,7 +139,9 @@ public struct VehicleStatusView: View {
                 Text(h.ok ? "已接通" : (h.lastError ?? "未探测"))
                     .font(.soviet(11))
                     .foregroundStyle(h.ok ? SovietPalette.ok : SovietPalette.danger)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                    .multilineTextAlignment(.trailing)
             }
             if let at = h.lastSuccessAt {
                 HStack {
@@ -252,8 +273,130 @@ public struct VehicleStatusView: View {
         .constructivistCard(borderColor: SovietPalette.black)
     }
 
-    private func footerCard(_ t: VehicleTelemetry) -> some View {
-        HStack {
+    // MARK: 本地数据（数据保留的可见凭证 + 一键清理）
+
+    private var localDataCard: some View {
+        let total = cacheEntries.reduce(0) { $0 + $1.bytes }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SovietSectionLabel("本地数据")
+                Spacer()
+                Text(total > 0 ? Self.sizeText(total) : "空")
+                    .font(.soviet(10))
+                    .foregroundStyle(SovietPalette.textFaint)
+            }
+
+            if cacheEntries.isEmpty {
+                Text("暂无缓存。成功拉到一次车况 / 轨迹后会自动落盘（沙盒 Application Support/ZontesRider）。")
+                    .font(.soviet(10))
+                    .foregroundStyle(SovietPalette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(cacheEntries, id: \.name) { e in
+                    HStack(spacing: 8) {
+                        Text(Self.friendly(e.name))
+                            .font(.soviet(10))
+                            .foregroundStyle(SovietPalette.textSecondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(Self.sizeText(e.bytes))
+                            .font(.soviet(10))
+                            .monospacedDigit()
+                            .foregroundStyle(SovietPalette.textFaint)
+                        Text(e.modifiedAt.map { Self.clock.string(from: $0) } ?? "--")
+                            .font(.soviet(10))
+                            .monospacedDigit()
+                            .foregroundStyle(SovietPalette.textFaint)
+                    }
+                }
+            }
+
+            row("缓存目录", "沙盒 · Application Support/ZontesRider")
+            row("网络留档", RawTrafficLog.tail(limit: 1).isEmpty ? "暂无" : "Documents/\(RawTrafficLog.fileName)")
+
+            HStack(spacing: 8) {
+                miniButton("刷新概览") { refreshLocalInfo() }
+                miniButton(showTrace ? "收起原始响应" : "查看原始响应") { showTrace.toggle() }
+                miniButton("清除缓存") {
+                    auth.clearLocalCache()
+                    refreshLocalInfo()
+                }
+            }
+
+            if showTrace {
+                let text = RawTrafficLog.tail(limit: 1400)
+                Text(text.isEmpty ? "暂无网络留档（net-trace.log 为空）" : text)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(SovietPalette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(SovietPalette.steelDark)
+                    .border(SovietPalette.black, width: 1)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(14)
+        .constructivistCard(borderColor: SovietPalette.black)
+    }
+
+    private func miniButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.soviet(10))
+                .tracking(1)
+                .foregroundStyle(SovietPalette.textSecondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .overlay { Rectangle().stroke(SovietPalette.textMuted, lineWidth: 1) }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private static func friendly(_ name: String) -> String {
+        if name == LocalStore.vehiclesFile { return "车辆列表" }
+        if name.hasPrefix("telemetry-") { return "车况快照" }
+        if name.hasPrefix("track-") {
+            if name.contains("-30d") { return "轨迹 · 近 30 日" }
+            if name.contains("-7d") { return "轨迹 · 近 7 日" }
+            return "轨迹 · 今日"
+        }
+        return name
+    }
+
+    private static func sizeText(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return String(format: "%.0f KB", Double(bytes) / 1024) }
+        return String(format: "%.1f MB", Double(bytes) / 1024 / 1024)
+    }
+
+    private func refreshLocalInfo() {
+        cacheEntries = auth.localCacheEntries()
+    }
+
+    /// 有数据时的错误提示：只占一条窄带，数据照常显示
+    private func inlineError(_ msg: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(SovietPalette.danger)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(stale ? "实时拉取失败（下方为本地缓存）" : "实时拉取失败")
+                    .font(.soviet(10))
+                    .foregroundStyle(SovietPalette.danger)
+                Text(msg)
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.textMuted)
+                    .lineLimit(3)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(SovietPalette.castIron)
+        .border(SovietPalette.danger, width: 1)
+    }
+
+    private func footerCard(_ t: VehicleTelemetry) -> some View {        HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text("故障码")
                     .font(.soviet(11))
@@ -291,14 +434,25 @@ public struct VehicleStatusView: View {
 
     private func load() async {
         guard auth.isLoggedIn else { return }
+        // 冷启动 / 断网：先把本地缓存摆上屏（用户诉求：数据要留下来）
+        if telemetry == nil, let snap = auth.cachedTelemetry() {
+            telemetry = snap.telemetry
+            cacheAt = snap.at
+            stale = true
+        }
         loading = true
         defer { loading = false }
         do {
-            telemetry = try await auth.fetchHomeData()
+            let t = try await auth.fetchHomeData()
+            telemetry = t
+            stale = false
+            cacheAt = nil
             errorText = nil
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if telemetry != nil { stale = true }
         }
+        refreshLocalInfo()
     }
 
     private static let clock: DateFormatter = {

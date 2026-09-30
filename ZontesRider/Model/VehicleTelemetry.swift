@@ -31,7 +31,7 @@ public struct HomeDataPayload: Decodable, Sendable {
 }
 
 /// 车辆定位（data.carLocation）
-public struct VehicleLocation: Decodable, Sendable, Equatable {
+public struct VehicleLocation: Codable, Sendable, Equatable {
     public let latitude: Double
     public let longitude: Double
 
@@ -78,8 +78,17 @@ public struct RawTelemetry: Decodable {
     public let longitude: Double?
     public let isShowOilTankAndSeatCushion: Bool?
 
-    /// 服务端在无有效数据时下发的哨兵值，UI 必须过滤，否则会显示成 400 万
-    public static let speedSentinel: Double = 4_000_000
+    /// 服务端在无有效数据时下发的哨兵值（2026-09-30 实测到 1000000；
+    /// 更早的接口版本下发过 4000000），UI 必须过滤，否则会显示成百万车速
+    public static let speedSentinels: [Double] = [1_000_000, 4_000_000]
+
+    /// 摩托车的合理车速上限（km/h）：超过一律视为无效数据
+    public static let maxPlausibleSpeed: Double = 400
+
+    public static func sanitizeSpeed(_ v: Double?) -> Double? {
+        guard let v, v >= 0, v <= maxPlausibleSpeed else { return nil }
+        return speedSentinels.contains(v) ? nil : v
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: RawTelemetry.CodingKeys.self)
@@ -162,7 +171,9 @@ private extension String {
 
 // MARK: - UI 展示模型
 
-public struct VehicleTelemetry: Sendable, Equatable {
+/// `Codable` 是给**本地持久化**用的（LocalStore）：车况成功一次就落盘，
+/// 之后冷启动/断网都能先把上次的车况摆出来，而不是一屏 `--`。
+public struct VehicleTelemetry: Codable, Sendable, Equatable {
     public var pkeCode: String
     public var displayName: String
     public var variant: String
@@ -189,7 +200,7 @@ public struct VehicleTelemetry: Sendable, Equatable {
     public var location: VehicleLocation?
     public var updatedAt: Date?
 
-    public enum LockState: Int, Sendable {
+    public enum LockState: Int, Codable, Sendable {
         case unknown = -1
         case unlocked = 0
         case locked = 1
@@ -259,7 +270,7 @@ public struct VehicleTelemetry: Sendable, Equatable {
             fuelPercent: raw.oil,
             rangeKm: raw.range,
             odometerKm: raw.totalMileage,
-            speedKmh: raw.speed.flatMap { $0 >= RawTelemetry.speedSentinel ? nil : $0 },
+            speedKmh: RawTelemetry.sanitizeSpeed(raw.speed),
             frontTireKpa: raw.frontTire,
             rearTireKpa: raw.rearTire,
             frontTireRated: raw.frontTireRate,

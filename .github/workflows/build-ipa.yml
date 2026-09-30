@@ -7,6 +7,38 @@ on:
 
 jobs:
   # ═════════════════════════════════════════════════════════════
+  # 作业 0：协议解析离线自检（不联网、不装模拟器，十几秒跑完）
+  #
+  # 2026-09-30 的线上故障「响应解析失败：Key 'code' not found ... Path: data」
+  # 根因是 getHomeData 把泛型实参写成 Envelope<HomeDataPayload>，与 perform 内部
+  # 的包膜叠加成双层包膜。两层都是 Decodable，**编译器拦不住**，
+  # 只能在真机上装包 → 登录 → 才暴露，一轮十几分钟。
+  #
+  # 这里用真实抓取、脱敏后的响应接上 URLProtocol 打桩，把客户端真实代码路径
+  # （perform → decodePayload → DTO）完整跑一遍并断言字段值。
+  # 该作业失败会**卡住出包**（build 依赖它），保证不再把这类 bug 发到手机上。
+  # ═════════════════════════════════════════════════════════════
+  decode-check:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 编译并运行协议解析自检
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcrun swiftc -swift-version 5 -parse-as-library \
+            ZontesRider/Model/VehicleTelemetry.swift \
+            ZontesRider/Model/TrackPoint.swift \
+            ZontesRider/Services/Net/IfinoAPI.swift \
+            ZontesRider/Services/Store/LocalStore.swift \
+            Tools/decode_check/main.swift \
+            -o build/decode_check
+          ./build/decode_check Tools/decode_check/Fixtures
+
+  # ═════════════════════════════════════════════════════════════
   # 作业 1：模拟器冒烟测试
   #
   # 这是本轮最关键的诊断手段。iOS 模拟器**完全不涉及**签名/描述文件/
@@ -177,6 +209,7 @@ jobs:
   # 两个都装一次，就能判定问题在代码还是在签名链路。
   # ═════════════════════════════════════════════════════════════
   build:
+    needs: [decode-check]
     runs-on: macos-15
     timeout-minutes: 40
     steps:

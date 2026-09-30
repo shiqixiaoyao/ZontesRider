@@ -43,11 +43,42 @@ public enum IfinoError: Error, LocalizedError, Sendable {
 }
 
 // MARK: 包膜
+//
+// ⚠️ 2026-09-30 线上事故（用户报「响应解析失败：DecodingError.KeyNotFound: Key 'code'
+//    not found in keyed decoding container. Path: data」）根因不在服务端，而在调用方：
+//    `getHomeData` 把泛型实参写成了 `Envelope<HomeDataPayload>`，而 `perform` 自己
+//    已经套了一层包膜 —— 于是实际解码的是 `Envelope<Envelope<HomeDataPayload>>`：
+//    根层的 `code` 存在 → 通过；接着拿根层的 `data` 去解内层 `Envelope`，
+//    内层要找 `code` → 根 data 里当然没有 → 每次必失败。车况页因此**从来没有成功过**。
+//
+//    教训：包膜的解开只允许发生在 `perform` / `decodePayload` 一处；
+//    业务层拿到的泛型实参**永远只能是业务类型本身**。
+//
+// 这个包膜同时做了容错：
+//   · code 允许 Int / "200" / 缺失（网关改版后不下发 code 也不会打死整条链路）
+//   · msg 兼容 msg / message
+//   · 内层 T 解码失败时**原样抛出**（错误信息才带得上真正的字段与路径）
 
 private struct Envelope<T: Decodable>: Decodable {
-    let code: Int
+    let code: Int?
     let msg: String?
     let data: T?
+
+    enum CodingKeys: String, CodingKey { case code, msg, message, data }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let i = try? c.decode(Int.self, forKey: .code) {
+            code = i
+        } else if let s = try? c.decode(String.self, forKey: .code), let i = Int(s) {
+            code = i
+        } else {
+            code = nil
+        }
+        msg = (try? c.decode(String.self, forKey: .msg))
+            ?? (try? c.decode(String.self, forKey: .message))
+        data = try c.decodeIfPresent(T.self, forKey: .data)
+    }
 }
 
 /// 轨迹按天切窗的单窗口结果（失败不抛，留给调用方决定怎么处理）
@@ -78,8 +109,11 @@ public struct TokenPayload: Decodable, Sendable {
 }
 
 // MARK: DTO · 车辆（字段名按 2026-09-30 实测 JSON 校准）
+//
+// `Codable` 的编码方向用于**本地缓存**（LocalStore）：键名写成服务端原样，
+// 这样再读回来时仍旧走下面这个 `init(from:)`，字段兼容逻辑只有一份。
 
-public struct MotorVehicle: Decodable, Sendable, Identifiable {
+public struct MotorVehicle: Codable, Sendable, Identifiable {
     public let pkeCode: String
     public let motorName: String?      // itemName
     public let motorCode: String?      // itemCode
@@ -139,6 +173,20 @@ public struct MotorVehicle: Decodable, Sendable, Identifiable {
             isShowOilTankAndSeatCushion = (s == "true" || s == "1")
         }
     }
+
+    /// 编码用服务端键名（`init(from:)` 的第一优先键），保证缓存 round-trip 稳定
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(pkeCode, forKey: .pkecode)
+        try c.encodeIfPresent(motorName, forKey: .itemName)
+        try c.encodeIfPresent(motorCode, forKey: .itemCode)
+        try c.encodeIfPresent(frameNumber, forKey: .cheJia)
+        try c.encodeIfPresent(plateNumber, forKey: .liencePlate)
+        try c.encodeIfPresent(imsi, forKey: .imsi)
+        try c.encodeIfPresent(mcuID, forKey: .mcuid)
+        try c.encodeIfPresent(serviceEndTime, forKey: .serviceValidTime)
+        try c.encode(isShowOilTankAndSeatCushion, forKey: .isShowOilTankAndSeatCushion)
+    }
 }
 
 // MARK: - 客户端
@@ -183,16 +231,20 @@ public actor IfinoAPIClient {
     // MARK: 实时车况
 
     /// 实测：data = { istate, carLocation:{latitude,longitude}, myCarData:{...全部车况字段...} }
+    ///
+    /// ⚠️ 泛型实参必须是 `HomeDataPayload`（业务类型），**不能**是 `Envelope<HomeDataPayload>`：
+    ///    `perform` 自己已经拆过一次包膜，再套一层就会去根的 data 里找 `code`，
+    ///    必然抛 `KeyNotFound: Key 'code' ... Path: data`（2026-09-30 的真实故障）。
     public func getHomeData(pkeCode: String, token: String) async throws -> VehicleTelemetry {
         guard !pkeCode.isEmpty else { throw IfinoError.noVehicle }
         var comps = URLComponents(string: Self.baseURL + "/pkeapp/gx/pke/carData/getHomeData")
         comps?.queryItems = [URLQueryItem(name: "pkeCode", value: pkeCode)]
         guard let url = comps?.url else { throw IfinoError.badURL }
-        let env: Envelope<HomeDataPayload> = try await perform(
+        let payload: HomeDataPayload = try await perform(
             url: url, method: "GET", form: nil, token: token
         )
-        guard let payload = env.data, let raw = payload.myCarData else {
-            throw IfinoError.decoding("getHomeData 缺 myCarData")
+        guard let raw = payload.myCarData else {
+            throw IfinoError.decoding("getHomeData 的 data 里没有 myCarData（服务端未下发车况）")
         }
         return VehicleTelemetry(raw: raw, location: payload.carLocation)
     }
@@ -336,22 +388,93 @@ public actor IfinoAPIClient {
         }
         guard let http = resp as? HTTPURLResponse else { throw IfinoError.network("非 HTTP 响应") }
         guard (200..<300).contains(http.statusCode) else {
+            RawTrafficLog.record(path: url.path, ok: false,
+                                 note: "HTTP \(http.statusCode)", body: data)
             if http.statusCode == 401 || http.statusCode == 403 { throw IfinoError.unauthorized }
             throw IfinoError.http(http.statusCode)
         }
+
+        return try Self.decodePayload(T.self, from: data, url: url)
+    }
+
+    // MARK: 包膜解析（perform 与离线自检工具共用的唯一实现）
+
+    /// 规则（宽容度递减）：
+    ///   1. 解根层包膜 `{code, msg, data}`；
+    ///   2. code 允许 Int / 数字字符串 / 缺失 —— 缺失且 data 存在时按成功处理；
+    ///   3. code != 200 → 服务端错误（401/403 → 登录过期）；
+    ///   4. 解 data → T；
+    ///   5. data 缺失/解不出 → 把整段 body 当 T 再试一次（有些接口不套包膜）。
+    /// 任何失败都会：把原始响应前 1200 字写进 Documents/net-trace.log，
+    /// 并把「人话版错误 + 原始片段」拼进错误文本 —— 下次不必再靠猜。
+    static func decodePayload<T: Decodable>(_ type: T.Type,
+                                            from data: Data,
+                                            url: URL? = nil) throws -> T {
+        let path = url?.path ?? "?"
 
         let env: Envelope<T>
         do {
             env = try JSONDecoder().decode(Envelope<T>.self, from: data)
         } catch {
-            throw IfinoError.decoding(String(describing: error))
+            let msg = shortDecodingError(error)
+            RawTrafficLog.record(path: path, ok: false, note: "解析失败 \(msg)", body: data)
+            throw IfinoError.decoding("\(msg)｜原始响应：\(head(data))")
         }
-        guard env.code == 200, let payload = env.data else {
-            let code = env.code
+
+        if let code = env.code, code != 200 {
+            RawTrafficLog.record(path: path, ok: false,
+                                 note: "code=\(code) \(env.msg ?? "")", body: data)
             if code == 401 || code == 403 { throw IfinoError.unauthorized }
             throw IfinoError.server(code: code, message: env.msg ?? "")
         }
-        return payload
+
+        if let payload = env.data {
+            RawTrafficLog.record(path: path, ok: true)
+            return payload
+        }
+
+        if let direct = try? JSONDecoder().decode(T.self, from: data) {
+            RawTrafficLog.record(path: path, ok: true, note: "无包膜直解")
+            return direct
+        }
+
+        RawTrafficLog.record(path: path, ok: false, note: "包膜里没有 data", body: data)
+        throw IfinoError.decoding("响应里没有 data（顶层键：\(topLevelKeys(data))）｜原始响应：\(head(data))")
+    }
+
+    /// 把 DecodingError 翻成人话（保留字段名与路径 —— 这正是这次排障最缺的信息）
+    public static func shortDecodingError(_ error: Error) -> String {
+        guard let e = error as? DecodingError else { return "\(error)" }
+        func where_(_ ctx: DecodingError.Context) -> String {
+            let p = ctx.codingPath.map(\.stringValue).joined(separator: ".")
+            return p.isEmpty ? "根层" : p
+        }
+        switch e {
+        case .keyNotFound(let key, let ctx):
+            return "响应缺少字段「\(key.stringValue)」（位置 \(where_(ctx))）"
+        case .typeMismatch(let t, let ctx):
+            return "字段类型不符，期望 \(t)（位置 \(where_(ctx))）"
+        case .valueNotFound(let t, let ctx):
+            return "字段是空值，期望 \(t)（位置 \(where_(ctx))）"
+        case .dataCorrupted(let ctx):
+            return "响应不是合法 JSON（\(ctx.debugDescription)）"
+        @unknown default:
+            return "未知解析错误"
+        }
+    }
+
+    static func topLevelKeys(_ data: Data) -> String {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "非 JSON 对象"
+        }
+        let keys = obj.keys.sorted().prefix(12)
+        return keys.isEmpty ? "（空对象）" : keys.joined(separator: ",")
+    }
+
+    /// 错误信息里的原始响应片段（比日志更短，避免 UI 上糊成一片）
+    static func head(_ data: Data) -> String {
+        let s = RawTrafficLog.snippet(data)
+        return s.count > 260 ? String(s.prefix(260)) + "…" : s
     }
 
     /// application/x-www-form-urlencoded 转义（含中文 brand）

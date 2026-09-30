@@ -18,9 +18,15 @@ public final class TrackViewModel {
     public var isLoading = false
     public var errorText: String?
     public var loadedAt: Date?
+    /// 当前折线来自本地缓存（尚未被云端结果覆盖）
+    public var isFromCache = false
+    public var cacheAt: Date?
     /// 已完成的按天窗口数 / 总窗口数（进度条用）
     public var doneChunks = 0
     public var totalChunks = 0
+
+    /// 当前 points 属于哪个档位（换档时必须先清空，否则会把 30 天的线画在「今日」档上）
+    private var loadedCacheKey = ""
 
     public init() {}
 
@@ -29,8 +35,29 @@ public final class TrackViewModel {
             points = []
             stats = .empty
             errorText = nil
+            isFromCache = false
+            cacheAt = nil
+            loadedCacheKey = ""
             return
         }
+
+        // 换档位 → 先清屏
+        if loadedCacheKey != range.cacheKey {
+            points = []
+            stats = .empty
+            isFromCache = false
+            cacheAt = nil
+            loadedCacheKey = range.cacheKey
+        }
+
+        // 先把本地缓存摆上屏：切档/冷启动都有折线可看，不必盯着空白等 10~70 秒
+        if points.isEmpty, let cached = auth.cachedTrack(range: range) {
+            points = cached.points
+            stats = TrackStats(points: cached.points)
+            cacheAt = cached.at
+            isFromCache = true
+        }
+
         isLoading = true
         doneChunks = 0
         let (start, end) = range.window()
@@ -51,10 +78,14 @@ public final class TrackViewModel {
             doneChunks = totalChunks
             errorText = nil
             loadedAt = Date()
+            isFromCache = false
+            cacheAt = nil
         } catch is CancellationError {
             // 切页/切档位导致的取消，不算错误
         } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            // 拉取失败但手里有缓存：保留折线，只把原因说清楚
+            errorText = isFromCache ? "\(msg)（下方为本地缓存）" : msg
         }
     }
 }
@@ -169,9 +200,19 @@ public struct TrackView: View {
                             .monospacedDigit()
                     }
                 } else {
-                    Text("\(viewModel.points.count) 个轨迹点")
-                        .font(.soviet(10))
-                        .foregroundStyle(SovietPalette.textFaint)
+                    HStack(spacing: 6) {
+                        if viewModel.isFromCache, let at = viewModel.cacheAt {
+                            Text("本地缓存 · \(Self.clock.string(from: at))")
+                                .font(.soviet(9))
+                                .foregroundStyle(SovietPalette.brass)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .overlay { Rectangle().stroke(SovietPalette.brass, lineWidth: 1) }
+                        }
+                        Text("\(viewModel.points.count) 个轨迹点")
+                            .font(.soviet(10))
+                            .foregroundStyle(SovietPalette.textFaint)
+                    }
                 }
             }
 
