@@ -46,18 +46,10 @@ jobs:
       - name: Pick a simulator
         id: sim
         run: |
-          UDID=$(xcrun simctl list devices available -j | python3 -c "
-import json,sys
-d=json.load(sys.stdin)['devices']
-for rt in sorted(d, reverse=True):
-    if 'iOS' not in rt: continue
-    for dev in d[rt]:
-        if dev.get('isAvailable') and dev['name'].startswith('iPhone'):
-            print(dev['udid']); raise SystemExit
-")
+          xcrun simctl list devices available | head -30
+          UDID=$(xcrun simctl list devices available | grep -E 'iPhone' | head -1 | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1)
           echo "udid=$UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
-          xcrun simctl list devices available | head -20
 
       # 模拟器构建不要 CODE_SIGNING_ALLOWED=NO，让 Xcode 正常做 ad-hoc 签名，
       # 否则 simctl install 会拒绝安装。
