@@ -51,79 +51,114 @@ jobs:
           echo "udid=$UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
-      # 模拟器构建不要 CODE_SIGNING_ALLOWED=NO，让 Xcode 正常做 ad-hoc 签名，
-      # 否则 simctl install 会拒绝安装。
-      - name: Build for simulator
+      # ⚠️ 必须用 Release。
+      # Xcode 16 的 Debug 配置会启用 "Debug Dylib"：主可执行文件变成一个
+      # 只负责加载 <App>.debug.dylib 的桩，并链上 libPreviewsJITStubExecutor。
+      # 这种产物用 simctl 在 Xcode 之外启动会直接失败（与 App 代码无关），
+      # 会污染判断。Release 才和真正发给用户的包同构。
+      - name: Build for simulator (Release)
         run: |
           set -o pipefail
-          xcodebuild \
-            -project ZontesRider.xcodeproj \
-            -scheme ZontesRider \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination "id=${{ steps.sim.outputs.udid }}" \
-            -derivedDataPath build/sim \
-            build 2>&1 | tail -60
+          for T in ZontesRider ZontesMinimal; do
+            echo "════════ sim build $T ════════"
+            xcodebuild \
+              -project ZontesRider.xcodeproj \
+              -scheme "$T" \
+              -configuration Release \
+              -sdk iphonesimulator \
+              -destination "id=${{ steps.sim.outputs.udid }}" \
+              -derivedDataPath build/sim \
+              build 2>&1 | tail -20
+          done
+
+      - name: Inspect app bundle and ad-hoc sign
+        run: |
+          set +e
+          for T in ZontesRider ZontesMinimal; do
+            APP="build/sim/Build/Products/Release-iphonesimulator/$T.app"
+            echo "════════ $T 产物检查 ════════"
+            ls -la "$APP"
+            echo "--- file ---"
+            file "$APP/$T"
+            echo "--- 是否带 code signature ---"
+            otool -l "$APP/$T" 2>/dev/null | grep -c LC_CODE_SIGNATURE
+            echo "--- 现有签名 ---"
+            codesign -dv --verbose=2 "$APP" 2>&1 | head -12
+            echo "--- 强制做一次全新 ad-hoc 签名（模拟 AltStore 重签这一动作）---"
+            codesign --force --deep --sign - "$APP" 2>&1 | head -8
+            echo "--- 校验签名 ---"
+            codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | head -12
+            echo "--- 签名后权限 ---"
+            ls -la "$APP/$T"
+          done
+          exit 0
 
       - name: Boot simulator and install
         run: |
+          set +e
           UDID="${{ steps.sim.outputs.udid }}"
+          xcrun simctl shutdown "$UDID" 2>/dev/null || true
           xcrun simctl boot "$UDID" 2>/dev/null || true
           xcrun simctl bootstatus "$UDID" -b || true
-          APP="build/sim/Build/Products/Debug-iphonesimulator/ZontesRider.app"
-          ls -la "$APP"
-          xcrun simctl install "$UDID" "$APP"
-          echo "installed ok"
+          for T in ZontesRider ZontesMinimal; do
+            BID=$( [ "$T" = "ZontesRider" ] && echo com.shiqixiaoyao.zontesrider || echo com.shiqixiaoyao.zontesminimal )
+            APP="build/sim/Build/Products/Release-iphonesimulator/$T.app"
+            xcrun simctl uninstall "$UDID" "$BID" 2>/dev/null || true
+            echo "── 安装 $T ──"
+            xcrun simctl install "$UDID" "$APP"
+            echo "install rc=$?"
+            echo "── 安装后容器里的可执行文件权限 ──"
+            CTR=$(xcrun simctl get_app_container "$UDID" "$BID" app 2>&1)
+            echo "container: $CTR"
+            ls -la "$CTR" 2>/dev/null
+            stat -f "%Sp %N" "$CTR/$T" 2>/dev/null || echo "(取不到)"
+          done
+          exit 0
 
       - name: Launch and observe
         run: |
-          UDID="${{ steps.sim.outputs.udid }}"
-          BID="com.shiqixiaoyao.zontesrider"
+          exec > >(tee sim-report.txt 2>&1) 2>&1
           set +e
+          UDID="${{ steps.sim.outputs.udid }}"
 
-          # --console-pty 会一直挂着并转发 App 的 stdout/stderr；
-          # 若进程提前退出，命令也会返回。
-          xcrun simctl launch --console-pty "$UDID" "$BID" > sim-console.log 2>&1 &
-          LP=$!
-          sleep 25
-
-          if kill -0 $LP 2>/dev/null; then
-            echo "SMOKE_RESULT=alive" >> "$GITHUB_ENV"
-            echo "✅ 模拟器里存活 25s —— 代码路径没问题"
-            kill $LP 2>/dev/null
-          else
-            echo "SMOKE_RESULT=crashed" >> "$GITHUB_ENV"
-            echo "❌ 模拟器里就退出了 —— 代码路径有问题"
-          fi
-
-          echo "══════════ App 控制台输出 ══════════"
-          cat sim-console.log 2>/dev/null || true
-
-          echo "══════════ 容器内的启动轨迹 ══════════"
-          C=$(xcrun simctl get_app_container "$UDID" "$BID" data 2>&1)
-          echo "container: $C"
-          echo "--- launch.phase.txt ---"
-          cat "$C/Documents/launch.phase.txt" 2>/dev/null || echo "(无)"
-          echo ""
-          echo "--- last-crash.txt ---"
-          cat "$C/Documents/last-crash.txt" 2>/dev/null || echo "(无)"
-          echo ""
-
-          echo "══════════ 模拟器崩溃报告 ══════════"
-          ls -la ~/Library/Logs/DiagnosticReports/ 2>/dev/null | tail -20 || true
-          for f in ~/Library/Logs/DiagnosticReports/ZontesRider*; do
-            [ -e "$f" ] || continue
-            echo "--- $f ---"
-            head -80 "$f"
+          # 用普通 launch（不用 --console-pty）：它会返回 pid 或明确报错，
+          # 上一次用 --console-pty 判断"存活"是错的——那个进程一直挂着，
+          # 哪怕 App 早就 spawn 失败被杀掉了。
+          for T in ZontesRider ZontesMinimal; do
+            BID=$( [ "$T" = "ZontesRider" ] && echo com.shiqixiaoyao.zontesrider || echo com.shiqixiaoyao.zontesminimal )
+            echo "════════════════════════════════"
+            echo "  测试 $T ($BID)"
+            echo "════════════════════════════════"
+            OUT=$(xcrun simctl launch "$UDID" "$BID" 2>&1)
+            RC=$?
+            echo "launch rc=$RC"
+            echo "$OUT"
+            sleep 10
+            echo "── 进程是否还在 ──"
+            if xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -qi "$BID"; then
+              echo "✅ $T 存活"
+            else
+              echo "❌ $T 已退出（spawn 失败或启动即崩）"
+            fi
+            echo "── 容器内的启动轨迹 ──"
+            C=$(xcrun simctl get_app_container "$UDID" "$BID" data 2>/dev/null)
+            echo "phase: $(cat "$C/Documents/launch.phase.txt" 2>/dev/null || echo 无)"
+            echo "crash: $(cat "$C/Documents/last-crash.txt" 2>/dev/null || echo 无)"
+            echo ""
           done
 
-          echo "══════════ 系统日志（致命/异常/dyld）══════════"
-          xcrun simctl spawn "$UDID" log show --last 3m --style compact 2>/dev/null \
-            | grep -iE "zontes|fatal|Fatal error|precondition|crash|dyld|uncaught|terminating" \
-            | tail -100 || true
+          echo "══════════ 模拟器崩溃报告 ══════════"
+          find ~/Library/Logs/DiagnosticReports -name "*Zontes*" 2>/dev/null | head
+          for f in $(find ~/Library/Logs/DiagnosticReports -name "*Zontes*" 2>/dev/null | head -3); do
+            echo "--- $f ---"
+            head -70 "$f"
+          done
 
-          echo "══════════ 进程是否还活着 ══════════"
-          xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i zontes || echo "(进程不在)"
+          echo "══════════ 系统日志（启动失败原因）══════════"
+          xcrun simctl spawn "$UDID" log show --last 4m --style compact 2>/dev/null \
+            | grep -iE "zontes|posix_spawn|spawn failed|posix|amfi|codesign|dyld|Fatal error|uncaught|Termination|EXC_|launchd_sim" \
+            | tail -120
+
           exit 0
 
       - name: Upload smoke logs
@@ -131,7 +166,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sim-smoke-logs
-          path: sim-console.log
+          path: sim-report.txt
           retention-days: 30
           if-no-files-found: warn
 
@@ -208,8 +243,15 @@ jobs:
           set -e
           cd build
           for T in ZontesRider ZontesMinimal; do
+            SRC="DerivedData/Build/Products/Release-iphoneos/$T.app"
+            # 显式确认可执行位（丢了的话设备上 posix_spawn 会直接 EACCES，
+            # 表现就是点图标立刻弹回桌面）
+            chmod +x "$SRC/$T"
+            echo "── $T 二进制权限/签名 ──"
+            stat -f "%Sp %N" "$SRC/$T"
+            otool -l "$SRC/$T" | grep -c LC_CODE_SIGNATURE
             rm -rf pkg && mkdir -p pkg/Payload
-            cp -r "DerivedData/Build/Products/Release-iphoneos/$T.app" pkg/Payload/
+            cp -r "$SRC" pkg/Payload/
             (cd pkg && zip -r -q "../$T-unsigned.ipa" Payload)
             ls -lh "$T-unsigned.ipa"
           done
