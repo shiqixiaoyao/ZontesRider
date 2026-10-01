@@ -18,8 +18,8 @@ public enum CommandError: Error, LocalizedError, Sendable {
         case .ackTimeout:               return "指令超时（车机无应答）"
         case .unsupportedOnBLE(let a):  return "\(a) 不走蓝牙明文通道（需云端或签名帧）"
         case .noVehicleKey:
-            return "还没拿到车辆钥匙（pkeCode）：请先在「车况」页登录并选中车辆，"
-                 + "再回来连接车机。pkeCode 是每一帧的钥匙，缺它车机不会应答。"
+            return "还没拿到车辆钥匙（pkeCode）：请先到「我的」页登录，选好车辆后再连车机。"
+                 + "pkeCode 是每一帧的钥匙，缺它车机不会应答。"
         }
     }
 }
