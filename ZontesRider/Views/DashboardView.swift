@@ -536,11 +536,21 @@ private struct BLELinkRow: View {
                 Text("车机蓝牙 · \(session.linkLabel)")
                     .font(.soviet(11))
                     .foregroundStyle(SovietPalette.textSecondary)
-                if let e = session.lastError, !session.isReady {
+                if session.pkeCode.isEmpty {
+                    // 没登录 / 车辆列表没拉到 → pkeCode 为空。
+                    // 这是"车机不应答"的头号原因（2026-10-01 实测：会拼出 `*BT,,10,001,7#`
+                    // 这种残帧发出去），必须显性说出来，不能等用户对着"指令超时"发呆。
+                    Text("缺车辆钥匙（未登录 / 未选中车辆）：请先到「车况」页登录选车")
+                        .font(.soviet(9))
+                        .foregroundStyle(SovietPalette.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let e = session.lastError, !session.isReady {
+                    // 失败原因要能读全（原来是 lineLimit(1)，长原因直接被截断）
                     Text(e)
                         .font(.soviet(9))
                         .foregroundStyle(SovietPalette.danger)
-                        .lineLimit(1)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else if let r = session.rssi {
                     Text("RSSI \(r) dBm")
                         .font(.soviet(9))
@@ -551,7 +561,7 @@ private struct BLELinkRow: View {
             Button {
                 Task { try? await session.connect() }
             } label: {
-                Text(session.isReady ? "重连" : "连接车机")
+                Text(session.isReady ? "重连" : (session.pkeCode.isEmpty ? "需先登录" : "连接车机"))
                     .font(.soviet(11))
                     .tracking(1)
                     .foregroundStyle(SovietPalette.castIron)

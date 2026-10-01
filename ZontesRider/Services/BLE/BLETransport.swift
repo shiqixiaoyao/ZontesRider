@@ -169,9 +169,57 @@ public actor BLETransport: TransportProtocol {
     /// 供 UI 轮询当前链路状态（只读，actor 内访问）
     public var currentState: TransportState { state }
 
+    // MARK: - 建链（同一时刻只允许一次）
+
+    /// 正在进行的建链尝试。并发调用复用同一次，避免互相顶掉等待者。
+    private var connectInFlight: Task<Void, Error>?
+
+    /// 扫描 → 连接 → 服务/特征 → CCCD → prime。
+    ///
+    /// ⚠️ 2026-10-01 实测日志暴露的两个问题，都在这里收口：
+    ///   1. 多次 `prepare()` 会各自启动一次 `connect()`，后一次把前一次等待中的
+    ///      `discoveredContinuation` 顶掉（槽位只有一个）→ 状态在 scanning 反复抖动、
+    ///      永远走不到 connecting。→ 加串行化，并发调用复用同一次尝试。
+    ///   2. 建链失败（例如扫描 12s 超时）后**状态永久停在 .scanning**，
+    ///      界面显示"一直在扫描"，日志里也没有任何失败行。→ 失败必须落到
+    ///      `.failed(reason)` 并落盘。
     public func connect() async throws {
+        if let inFlight = connectInFlight {
+            try await inFlight.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            try await self.performConnect()
+        }
+        connectInFlight = task
+        defer { connectInFlight = nil }
+
+        do {
+            try await task.value
+        } catch {
+            // 取消是控制流，不是故障：不标失败、不落盘
+            if error is CancellationError { throw error }
+            let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            switch state {
+            case .failed: break      // 已有更具体的原因（如"蓝牙已关闭"），不覆盖
+            default:      state = .failed(reason)
+            }
+            BLETrace.log("EVT", "connect failed: \(reason)")
+            throw error
+        }
+    }
+
+    private func performConnect() async throws {
         intentionalDisconnect = false
         reconnectTask?.cancel()
+
+        // 清掉上一次没走完的等待者（串行化后正常路径不会有，保险起见；
+        // resume 前先置 nil，保证每个 continuation 只被 resume 一次）
+        discoveredContinuation?.resume(throwing: TransportError.notReady)
+        discoveredContinuation = nil
+        connectContinuation?.resume(throwing: TransportError.notReady)
+        connectContinuation = nil
 
         try await ensurePoweredOn()
 

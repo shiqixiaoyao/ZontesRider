@@ -51,8 +51,23 @@ public enum BLETuning {
 
 public enum ControlPrime {
     /// 组帧：StringBuilder("*BT,") + pke + ",10,001,7#"（反汇编原文）
+    ///
+    /// ⚠️ 本方法**不校验** pkeCode —— 它是纯拼接。空 pke 会拼出 `*BT,,10,001,7#`，
+    ///    车机必然不应答。所以调用方**必须先过 `VehicleKey.isValid`**（见 VehicleControlService）。
     public static func frame(pkeCode: String) -> String {
         "*BT,\(pkeCode),10,001,7#"
+    }
+}
+
+/// 车辆钥匙（pkeCode）校验 —— 单一口径，别在别处再写一遍判空。
+///
+/// 为什么值得单独一个类型（2026-10-01 实测）：
+///   未登录 / 车辆列表没拉到 / 未选中车辆时 `activePKECode` 是 nil，
+///   上游用 `?? ""` 兜了一下，于是握手帧变成 `*BT,,10,001,7#` 被**静默发出去**，
+///   用户只看到「指令超时」，根本猜不到是缺钥匙。空 pke 是"车机不应答"的头号原因。
+public enum VehicleKey {
+    public static func isValid(_ pkeCode: String) -> Bool {
+        !pkeCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

@@ -383,6 +383,16 @@ struct DecodeCheck {
         report.expectEq(FrameParser.secureToken(of: "*BT,ABC,10,001,7#"), "7",
                         "5 段帧按 index 4 取（官方规则如此，不要擅自收紧）")
 
+        // ⑤ 车辆钥匙（pkeCode）守卫 —— 2026-10-01 实测踩过的坑：
+        //    未登录/未选车时 pkeCode 是空的，残帧 `*BT,,10,001,7#` 被静默发出去，
+        //    车机不应答，用户只看到"指令超时"，完全猜不到原因。
+        report.expect(!VehicleKey.isValid(""), "空 pkeCode 判为无效")
+        report.expect(!VehicleKey.isValid("   "), "纯空白 pkeCode 判为无效")
+        report.expect(VehicleKey.isValid("864918000000000"), "正常 pkeCode 判为有效")
+        // 残帧本身长什么样，写死给后人看：中间空一段，正是"缺钥匙"的指纹
+        report.expectEq(ControlPrime.frame(pkeCode: ""), "*BT,,10,001,7#",
+                        "空 pkeCode 拼出的残帧（调用方必须先过 VehicleKey.isValid）")
+
         exit(report.summary())
     }
 }

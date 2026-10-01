@@ -40,6 +40,14 @@ public final class VehicleControlService: ControlCommandSending, @unchecked Send
     /// 收不到也继续（官方同样继续，只记一条），但我们把它落盘——
     /// 这是判断「车机认不认我们这条通道」的第一手证据。
     public func prepare() async throws {
+        // ⚠️ 2026-10-01 实测日志抓到的真凶：pkeCode 为空时，原来会照拼
+        //    `*BT,,10,001,7#`（中间空了一段）并**静默发出去**——车机当然不应答，
+        //    用户只看到「指令超时」，完全猜不到原因是"没登录/没选车"。
+        //    这里直接拒绝，并给出人话原因。
+        guard VehicleKey.isValid(pkeCode) else {
+            BLETrace.log("EVT", "中止：pkeCode 为空（未登录/未选中车辆），拒绝发送残缺握手帧")
+            throw CommandError.noVehicleKey
+        }
         if await transport.currentState == .ready { return }
         let prime = ControlPrime.frame(pkeCode: pkeCode)
         await transport.setPrimeFrame(prime)
@@ -182,6 +190,7 @@ public final class BLESession {
     // MARK: 动作
 
     public func connect() async throws {
+        try ensureVehicleKey()
         let svc = ensureService()
         do {
             try await svc.prepare()
@@ -193,6 +202,7 @@ public final class BLESession {
     }
 
     public func send(_ action: ControlAction) async throws {
+        try ensureVehicleKey()
         let svc = ensureService()
         do {
             try await svc.send(action)
@@ -200,6 +210,15 @@ public final class BLESession {
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             throw error
+        }
+    }
+
+    /// 没有 pkeCode 就**不建蓝牙栈、不发帧**（连扫描都省掉）：
+    /// 早失败 + 说人话，比让用户对着"扫描中…"发呆强。
+    private func ensureVehicleKey() throws {
+        guard VehicleKey.isValid(pke) else {
+            lastError = CommandError.noVehicleKey.errorDescription
+            throw CommandError.noVehicleKey
         }
     }
 
