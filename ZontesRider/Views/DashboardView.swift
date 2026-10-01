@@ -146,6 +146,9 @@ public final class DashboardViewModel {
             cacheAt = nil
             hasLiveData = true
             connection = .connected(rssi: t.tboxSignal.map { -115 + $0 * 10 } ?? -70)
+        } catch is CancellationError {
+            // 切页 / 退后台导致的取消：不是故障，不报错、不把连接标成断开
+            return
         } catch {
             loadError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             connection = .disconnected

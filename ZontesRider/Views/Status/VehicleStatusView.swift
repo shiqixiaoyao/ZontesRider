@@ -37,8 +37,17 @@ public struct VehicleStatusView: View {
         .task(id: auth.isLoggedIn) {
             await load()
             // 登录后每 15 秒自动刷新一次，做到「实时」（离开本页自动停止）
+            //
+            // ⚠️ sleep 被取消时**必须退出**，不能继续往下发起请求：
+            //   切 tab / 切后台时 SwiftUI 会取消本视图的 task，若此时仍调用 load()，
+            //   里面的请求会立刻被取消并抛 CancellationError，被 catch 兜住就会
+            //   渲染成「实时拉取失败」—— 2026-10-01 用户看到的假故障就是这么来的。
             while auth.isLoggedIn && !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                } catch {
+                    break
+                }
                 await load()
             }
         }
@@ -455,6 +464,11 @@ public struct VehicleStatusView: View {
             stale = false
             cacheAt = nil
             errorText = nil
+        } catch is CancellationError {
+            // 切页 / 退后台 / 下拉刷新打断了上一次请求 —— 取消不是故障，
+            // 绝不能显示成「实时拉取失败」（那会让用户误以为云端挂了）
+            refreshLocalInfo()
+            return
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if telemetry != nil { stale = true }
