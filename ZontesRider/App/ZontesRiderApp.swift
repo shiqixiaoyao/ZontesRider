@@ -15,11 +15,15 @@ import SwiftData
 @main
 struct ZontesRiderApp: App {
     @State private var auth: AuthStore
-    private let container: ModelContainer
+    /// nil = 磁盘库、重建库、内存库**全都建不起来**。
+    /// 此时**不许崩**：退化成「油耗工段不可用」，其余功能照常。
+    /// （2026-10-01：LiveContainer 等容器内运行时环境下 SwiftData 可能整个建不起来，
+    ///  原来的 `try!` 兜底会直接把「点图标秒退」做实。）
+    private let container: ModelContainer?
     private let diagnosticMode: Bool
 
     init() {
-        // ① 先把崩溃钩子装上，后面任何 NSException 都会落盘
+        // ① 先把崩溃钩子装上（含信号级崩溃），后面任何一步走了都留痕
         LaunchTrace.install()
         LaunchTrace.mark("app.init")
 
@@ -31,7 +35,7 @@ struct ZontesRiderApp: App {
         _auth = State(initialValue: AuthStore())
         LaunchTrace.mark("auth.ready")
 
-        // ④ 数据容器：诊断模式不碰磁盘库，正常模式走三级降级
+        // ④ 数据容器：诊断模式不碰磁盘库，正常模式走三级降级（全失败返回 nil，不崩）
         container = diagnosticMode ? Self.makeMemoryContainer() : Self.makeContainer()
         LaunchTrace.mark(diagnosticMode ? "app.diagnostic" : "app.ready")
     }
@@ -41,9 +45,9 @@ struct ZontesRiderApp: App {
             if diagnosticMode {
                 LaunchDiagnosticView()
             } else {
-                RootView()
+                RootView(fuelStoreAvailable: container != nil)
                     .environment(auth)
-                    .modelContainer(container)
+                    .modelContainerIfAvailable(container)
                     .preferredColorScheme(.dark)
                     .task {
                         LaunchTrace.mark("root.mounted")
@@ -57,9 +61,11 @@ struct ZontesRiderApp: App {
     }
 
     // MARK: - SwiftData 容器的三级降级
+    //
+    // 三级：磁盘库 → 删掉损坏库重建 → 内存库。**任何一级都不许 fatalError/try!**，
+    // 全失败就返回 nil，由上层把它降级成「油耗工段不可用」。
 
-    /// 磁盘库 → 删掉损坏库重建 → 内存库。全失败才真的没辙（理论上到不了）。
-    private static func makeContainer() -> ModelContainer {
+    private static func makeContainer() -> ModelContainer? {
         let schema = Schema([FuelEntry.self])
 
         // 第 1 级：正常打开磁盘库
@@ -78,18 +84,15 @@ struct ZontesRiderApp: App {
         LaunchTrace.mark("container.rebuild-failed")
 
         // 第 3 级：内存库兜底（油耗记录本次不持久化，但 App 一定能起来）
-        LaunchTrace.mark("container.memory-ok")
-        return makeMemoryContainer()
+        let c = makeMemoryContainer()
+        LaunchTrace.mark(c == nil ? "container.memory-failed" : "container.memory-ok")
+        return c
     }
 
-    private static func makeMemoryContainer() -> ModelContainer {
+    private static func makeMemoryContainer() -> ModelContainer? {
         let schema = Schema([FuelEntry.self])
         let memory = ModelConfiguration(isStoredInMemoryOnly: true)
-        if let c = try? ModelContainer(for: schema, configurations: memory) {
-            return c
-        }
-        // 兜底：内存库几乎不可能失败，而返回不了容器就必然崩，别无选择
-        return try! ModelContainer(for: schema, configurations: memory)
+        return try? ModelContainer(for: schema, configurations: memory)
     }
 
     /// 删掉 SwiftData 的默认磁盘库（含 -shm / -wal 附属文件）
@@ -100,6 +103,21 @@ struct ZontesRiderApp: App {
         for name in ["default.store", "default.store-shm", "default.store-wal",
                      ".default.support", "default.store-journal"] {
             try? fm.removeItem(at: dir.appendingPathComponent(name))
+        }
+    }
+}
+
+// MARK: - 可选容器修饰器
+
+private extension View {
+    /// 容器可用才注入；nil 时不注入（对应「油耗工段不可用」的降级形态）。
+    /// 不能直接写 `.modelContainer(container)` —— 那个 API 不接受可选值。
+    @ViewBuilder
+    func modelContainerIfAvailable(_ container: ModelContainer?) -> some View {
+        if let container {
+            self.modelContainer(container)
+        } else {
+            self
         }
     }
 }

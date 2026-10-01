@@ -23,15 +23,31 @@ struct LaunchDiagnosticView: View {
                 Text("升仕车机 · 安全诊断模式")
                     .font(.title3.bold())
 
-                Text("检测到 App 连续两次启动失败，已跳过正常界面。请把本页截图发给开发者，即可定位。")
+                Text("检测到 App 连续两次启动失败，已跳过正常界面。"
+                     + "请把本页**截图**发给开发者即可定位。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 field("App 版本 / 系统", "\(appVersion) · iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)")
                 field("失败次数", "\(LaunchTrace.attempts)")
                 field("上次止于", LaunchTrace.phase ?? "（无记录）")
-                field("崩溃记录", LaunchTrace.crash ?? "（没有 NSException，多半是 Swift 致命错误，看上面的「上次止于」即可定位）")
-                field("日志文件", "系统「文件」App → 我的 iPhone → 升仕车机 → launch.phase.txt / last-crash.txt")
+                field("崩溃记录", LaunchTrace.crash ?? "（没有 NSException / 信号记录，多半是启动早期就被系统杀掉）")
+
+                // 步骤流水：一眼看出死在哪个环节之后
+                field("启动步骤流水", LaunchTrace.steps())
+
+                // 多路径落盘：LiveContainer 等环境下「文件」App 里可能看不到 guest 目录，
+                // 所以这里直接把「写到哪了、内容是什么」显示在屏幕上。
+                field("落盘位置与内容",
+                      LaunchTrace.locations.map { loc in
+                          let state = loc.content.map {
+                              "✓ \($0.trimmingCharacters(in: .whitespacesAndNewlines))"
+                          } ?? "✗ 无"
+                          return "\(state)  ←  \(loc.path)"
+                      }.joined(separator: "\n"))
+
+                field("说明", "在 LiveContainer / 侧载环境下，App 的数据目录可能不是「文件」App 里能直接看到的"
+                      + "那个，所以以本页显示的「落盘位置」为准。")
 
                 Button {
                     LaunchTrace.reset()

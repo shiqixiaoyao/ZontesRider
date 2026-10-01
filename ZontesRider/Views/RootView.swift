@@ -50,8 +50,14 @@ public struct RootView: View {
     /// 会造成「第一次打开就被判为异常」的误伤。
     @State private var safeMode = LaunchTrace.crash != nil
 
+    /// SwiftData 容器是否可用。不可用时**不构造**油耗工段（它有 @Query，
+    /// 环境里没有容器会直接 fatalError）——退化成提示页，其余工段照常。
+    private let fuelStoreAvailable: Bool
+
     // BLESession 是 MainActor 隔离类型，init 必须在主线程上下文求值
-    @MainActor public init() {}
+    @MainActor public init(fuelStoreAvailable: Bool = true) {
+        self.fuelStoreAvailable = fuelStoreAvailable
+    }
 
     public var body: some View {
         TabView(selection: $selection) {
@@ -61,8 +67,18 @@ public struct RootView: View {
             TrackView()
                 .tag(AppTab.track)
 
-            FuelTrackerView()
-                .tag(AppTab.fuel)
+            // ⚠️ 这里必须是条件分支而不是包一个可选视图：
+            //    油耗工段用 @Query，环境里没有 ModelContainer 时会直接致命错误。
+            //    tag 打在 Group 上（而不是两个分支各自打），避免 _ConditionalContent
+            //    切换时 tab 选中态出现歧义。
+            Group {
+                if fuelStoreAvailable {
+                    FuelTrackerView()
+                } else {
+                    FuelStoreUnavailableView()
+                }
+            }
+            .tag(AppTab.fuel)
 
             VehicleStatusView()
                 .tag(AppTab.status)
@@ -122,6 +138,42 @@ public struct RootView: View {
             try? await Task.sleep(for: .seconds(3))
         }
         LaunchTrace.mark("probe.done")
+    }
+}
+
+// MARK: - 油耗工段不可用（数据库起不来时的降级形态）
+//
+// ⚠️ 这一页**绝不能碰 SwiftData**（不写 @Query / @Environment(\.modelContext)），
+//    否则在没有容器的环境里会直接崩，降级就白做了。
+
+private struct FuelStoreUnavailableView: View {
+    var body: some View {
+        ZStack {
+            SovietPalette.castIron.ignoresSafeArea()
+            VStack(spacing: 14) {
+                HazardStripes()
+                SovietBanner("油耗工段")
+                Spacer()
+                VStack(spacing: 10) {
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .font(.system(size: 30))
+                        .foregroundStyle(SovietPalette.brass)
+                    Text("本地数据库不可用")
+                        .font(.soviet(14))
+                        .tracking(2)
+                        .foregroundStyle(SovietPalette.brass)
+                    Text("本次启动没能建起本地数据库，油耗记录暂不可用。\n"
+                         + "其余工段不受影响。可到「我的」查看启动诊断。")
+                        .font(.soviet(10))
+                        .foregroundStyle(SovietPalette.textMuted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 26)
+                Spacer()
+                HazardStripes()
+            }
+        }
     }
 }
 
