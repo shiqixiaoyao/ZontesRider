@@ -331,9 +331,12 @@ struct DecodeCheck {
                         "*UFreeze,ABC#", "设防帧")
         report.expectEq(PlaintextCommand.refresh.frame(pkeCode: "ABC"),
                         "*RE,ABC#", "刷新帧")
-        // 9 条指令的前缀一个都不许改（Lmfa.a 的 9 个 case 逐一验算过 hashCode）
+        // 9 条指令的前缀一个都不许改。⚠️ 指令表是 **8 条**，不是 9 条：
+        // Lmfa.a 的 switch 里有 9 个名字（多一个 `track`），但字符串表里能确证的
+        // 出站前缀只有 7 个（*RE / *ULoc / *UF / *UKEY / *UChase / *UClear / *UFreeze）+ `*AC`，
+        // `track` 的前缀在混淆字节码里取不到 —— 宁可少一条也不伪造前缀。
         let prefixes = PlaintextCommand.allCases.map(\.rawValue)
-        report.expectEq(prefixes.count, 9, "指令表条数")
+        report.expectEq(prefixes.count, 8, "指令表条数（可确证前缀的 8 条）")
         report.expect(prefixes.allSatisfy { $0.hasPrefix("*") && !$0.hasSuffix(",") },
                       "前缀不带尾部逗号（组帧时自己加）", prefixes.joined(separator: " "))
 
@@ -370,11 +373,15 @@ struct DecodeCheck {
                       "指令 ACK 不会被误认成 ready ack")
         report.expect(FrameParser.isReadyAck(of: "*BT,ABC,10,001,7#"),
                       "带 7 字段的帧 = ready ack")
-        // 第 5 段非空才算「安全响应」token；短帧不许瞎报
-        let shortToken: String? = FrameParser.secureToken(of: "*BT,ABC,10,001,7#")
-        report.expect(shortToken == nil, "4 段帧没有 token", String(describing: shortToken))
+        // 第 5 段非空才算「安全响应」token。⚠️ 官方规则就是这么松：
+        // 按 index 4 取段，所以 prime 帧自己（5 段）也会被判出 token "7"。
+        // 这条断言的作用是**钉死这个松度**：一旦有人把 index 改成别的，这里立刻红。
+        let threeFieldToken: String? = FrameParser.secureToken(of: "*UClear,ABC#")
+        report.expect(threeFieldToken == nil, "3 段帧没有 token", String(describing: threeFieldToken))
         report.expectEq(FrameParser.secureToken(of: "*BT,ABC,10,008,AB12CD#"), "AB12CD",
                         "第 5 段 = token（大写去 #）")
+        report.expectEq(FrameParser.secureToken(of: "*BT,ABC,10,001,7#"), "7",
+                        "5 段帧按 index 4 取（官方规则如此，不要擅自收紧）")
 
         exit(report.summary())
     }
