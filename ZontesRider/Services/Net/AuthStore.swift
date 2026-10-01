@@ -287,9 +287,9 @@ public final class AuthStore {
                 }
             }
             throw e
-        } catch is CancellationError {
+        } catch let cancel as CancellationError {
             // 取消不记入链路健康（不是云端故障），原样抛出给调用方判断
-            throw error
+            throw cancel
         } catch {
             health.ok = false
             health.lastError = error.localizedDescription
@@ -334,9 +334,9 @@ public final class AuthStore {
                 }
             }
             throw e
-        } catch is CancellationError {
+        } catch let cancel as CancellationError {
             // 切档位 / 切页导致的取消，不算链路故障
-            throw error
+            throw cancel
         } catch {
             health.ok = false
             health.lastError = error.localizedDescription
