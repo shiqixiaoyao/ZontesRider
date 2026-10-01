@@ -424,8 +424,48 @@ public struct DashboardView: View {
                 .foregroundStyle(SovietPalette.textFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // 蓝牙帧日志：点一次解锁就能看到「发了什么 / 车机回了什么」，
+            // 这是后续校准指令帧的唯一凭据（云端已证实无控车接口）
+            Button {
+                showBLETrace.toggle()
+                if showBLETrace { bleTrace = BLETrace.tail() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                    Text(showBLETrace ? "收起蓝牙帧日志" : "查看蓝牙帧日志（校准用）")
+                        .font(.soviet(10))
+                        .tracking(1)
+                    Spacer()
+                }
+                .foregroundStyle(SovietPalette.brass)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .overlay { Rectangle().stroke(SovietPalette.brass, lineWidth: 1) }
+            }
+            .buttonStyle(.plain)
+
+            if showBLETrace {
+                Text(bleTrace.isEmpty ? "暂无蓝牙帧记录（先在上方点「连接车机」或发一条指令）" : bleTrace)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(SovietPalette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(SovietPalette.steelDark)
+                    .border(SovietPalette.black, width: 1)
+                    .textSelection(.enabled)
+                Button("清除蓝牙帧日志") {
+                    BLETrace.clear()
+                    bleTrace = ""
+                }
+                .font(.soviet(9))
+                .foregroundStyle(SovietPalette.textMuted)
+            }
         }
     }
+
+    @State private var showBLETrace = false
+    @State private var bleTrace = ""
 
     // MARK: 底部状态
 

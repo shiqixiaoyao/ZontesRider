@@ -36,7 +36,10 @@ public final class VehicleControlService: ControlCommandSending, @unchecked Send
     /// （扫描 12s → 连接 10s → 服务/特征 5s → CCCD 3s → prime 帧 "*BT,<pke>,10,001,7#"）
     public func prepare() async throws {
         if await transport.currentState == .ready { return }
-        await transport.setPrimeFrame("*BT,\(pkeCode),10,001,7#")
+        let prime = "*BT,\(pkeCode),10,001,7#"
+        await transport.setPrimeFrame(prime)
+        // 观测点：握手帧同样落盘（校准时要看完整帧序列）
+        BLETrace.log("TX-PRIME", prime)
         try await transport.connect()
     }
 

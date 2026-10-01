@@ -57,6 +57,9 @@ public actor VehicleCommandChannel {
             throw CommandError.vehicleRejected("帧编码失败")
         }
 
+        // 观测点：把真实发出的帧落盘（控车校准的唯一凭据）
+        BLETrace.log("TX", frame)
+
         let watchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(BLETuning.commandTimeout))
             await self?.failPending(CommandError.ackTimeout)
@@ -99,6 +102,8 @@ public actor VehicleCommandChannel {
 
     /// UART 粘包处理：按 '#' 切完整帧，残段留缓冲
     private func consume(_ chunk: String) {
+        // 观测点：车机回了什么都记下来（含无法识别的帧——那正是要校准的样本）
+        BLETrace.log("RX", chunk)
         buffer += chunk
         while let idx = buffer.firstIndex(of: "#") {
             let frame = String(buffer[...idx])
