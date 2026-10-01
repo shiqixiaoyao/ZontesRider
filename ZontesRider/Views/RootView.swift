@@ -86,13 +86,42 @@ public struct RootView: View {
         .onAppear { LaunchTrace.mark("root.appear") }
         .task {
             LaunchTrace.mark("root.task")
-            guard !safeMode else { return }
-            ble.reconfigure(pkeCode: auth.activePKECode ?? "")
+            if !safeMode {
+                ble.reconfigure(pkeCode: auth.activePKECode ?? "")
+            }
+            await runProbeIfNeeded()
         }
         .onChange(of: auth.activePKECode) { _, newValue in
             guard !safeMode else { return }
             ble.reconfigure(pkeCode: newValue ?? "")
         }
+    }
+
+    // MARK: - CI 探针（默认关闭，只影响带 ZR_PROBE=1 启动的进程）
+    //
+    // 背景：2026-10-01 用户又报「闪退」，但 CI 冒烟一直是绿的 ——
+    // 因为冒烟只**启动** App、不切页面，**页面级崩溃它根本抓不到**（上次的
+    // `1..<0` 区间 trap 就是「构造即崩」，属于少数能在启动路径上暴露的情况）。
+    //
+    // 所以这里加一条探针：带环境变量启动时，自动把五个工段逐个切一遍，
+    // 每切一个就打一个 phase 点。哪个工段一渲染就崩，`launch.phase.txt`
+    // 就会停在 `probe.<编号>` 上，CI 再据此判失败——把「用户报闪退 → 我们猜」
+    // 变成「CI 自己复现并指出工段」。
+    //
+    // CI 侧的开启方式：`SIMCTL_CHILD_ZR_PROBE=1 xcrun simctl launch <udid> <bundle>`
+
+    private func runProbeIfNeeded() async {
+        guard ProcessInfo.processInfo.environment["ZR_PROBE"] == "1" else { return }
+        // 启动自带的 stable 打点在挂载后 2s 写；先等它落定，免得被 probe 打点覆盖
+        try? await Task.sleep(for: .seconds(3))
+        LaunchTrace.mark("probe.begin")
+        for tab in AppTab.allCases {
+            LaunchTrace.mark("probe.\(tab.rawValue)")
+            selection = tab
+            // 每个工段驻留久一点：既让 body 求值，也让 onAppear/网络回调跑起来
+            try? await Task.sleep(for: .seconds(3))
+        }
+        LaunchTrace.mark("probe.done")
     }
 }
 

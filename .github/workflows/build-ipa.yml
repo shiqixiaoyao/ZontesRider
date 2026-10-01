@@ -158,6 +158,7 @@ jobs:
           exec > >(tee sim-report.txt 2>&1) 2>&1
           set +e
           UDID="${{ steps.sim.outputs.udid }}"
+          SMOKE_FAIL=0
 
           # 用普通 launch（不用 --console-pty）：它会返回 pid 或明确报错，
           # 上一次用 --console-pty 判断"存活"是错的——那个进程一直挂着，
@@ -167,21 +168,53 @@ jobs:
             echo "════════════════════════════════"
             echo "  测试 $T ($BID)"
             echo "════════════════════════════════"
-            OUT=$(xcrun simctl launch "$UDID" "$BID" 2>&1)
+            # ZontesRider 带探针启动：自动遍历五个工段（页面级崩溃只有在切页时才暴露）
+            if [ "$T" = "ZontesRider" ]; then
+              WAIT=25
+              OUT=$(SIMCTL_CHILD_ZR_PROBE=1 xcrun simctl launch "$UDID" "$BID" 2>&1)
+            else
+              WAIT=8
+              OUT=$(xcrun simctl launch "$UDID" "$BID" 2>&1)
+            fi
             RC=$?
             echo "launch rc=$RC"
             echo "$OUT"
-            sleep 10
+            sleep $WAIT
             echo "── 进程是否还在 ──"
+            ALIVE=1
             if xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -qi "$BID"; then
               echo "✅ $T 存活"
             else
               echo "❌ $T 已退出（spawn 失败或启动即崩）"
+              ALIVE=0
             fi
             echo "── 容器内的启动轨迹 ──"
             C=$(xcrun simctl get_app_container "$UDID" "$BID" data 2>/dev/null)
-            echo "phase: $(cat "$C/Documents/launch.phase.txt" 2>/dev/null || echo 无)"
+            PHASE=$(cat "$C/Documents/launch.phase.txt" 2>/dev/null || echo 无)
+            echo "phase: $PHASE"
             echo "crash: $(cat "$C/Documents/last-crash.txt" 2>/dev/null || echo 无)"
+
+            # ⚠️ 这一段的判失败逻辑是补上来的：
+            #   原来只 echo ❌ 就 exit 0 —— 于是「App 崩了」也能一路绿灯出包，
+            #   和我们自己立的「不再有任何假成功」相矛盾。
+            if [ "$ALIVE" = "0" ]; then
+              echo "::error::$T 在启动/探针期间退出（进程已不在）"
+              SMOKE_FAIL=1
+            fi
+            if [ "$T" = "ZontesRider" ]; then
+              case "$PHASE" in
+                probe.done)
+                  echo "✅ 探针跑完：五个工段逐个渲染过，无页面级崩溃"
+                  ;;
+                probe.*)
+                  echo "::error::页面级崩溃：探针停在 phase=$PHASE（对应工段编号见 RootView.AppTab 顺序 0仪表/1轨迹/2油耗/3车况/4我的）"
+                  SMOKE_FAIL=1
+                  ;;
+                *)
+                  echo "⚠️ 探针未跑起来（phase=$PHASE）—— 检查 SIMCTL_CHILD_ZR_PROBE 是否透传"
+                  ;;
+              esac
+            fi
             echo ""
           done
 
@@ -197,6 +230,10 @@ jobs:
             | grep -iE "zontes|posix_spawn|spawn failed|posix|amfi|codesign|dyld|Fatal error|uncaught|Termination|EXC_|launchd_sim" \
             | tail -120
 
+          if [ "$SMOKE_FAIL" = "1" ]; then
+            echo "::error::冒烟测试判定失败：见上面的 ::error:: 行"
+            exit 1
+          fi
           exit 0
 
       - name: Upload smoke logs
