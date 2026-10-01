@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 // MARK: - 轨迹工段（真实云端轨迹）
 //
@@ -231,13 +232,77 @@ public struct TrackView: View {
                 .frame(height: 3)
             }
 
+            // 真实地图（MapKit）：国内底图是 GCJ-02，车辆上报是 WGS-84，
+            // 必须纠偏，否则折线会整体偏出几十~几百米
+            trackMap
+                .frame(height: 260)
+                .border(SovietPalette.black, width: 2)
+
+            HStack {
+                Text("坐标系")
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.textMuted)
+                Spacer()
+                Button {
+                    useGcj02.toggle()
+                } label: {
+                    Text(useGcj02 ? "GCJ-02（已纠偏）" : "WGS-84（原始）")
+                        .font(.soviet(9))
+                        .tracking(1)
+                        .foregroundStyle(SovietPalette.brass)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .overlay { Rectangle().stroke(SovietPalette.brass, lineWidth: 1) }
+                }
+                .buttonStyle(.plain)
+            }
+
+            SovietSectionLabel("路线简图")
             TrackPlot(points: viewModel.points)
-                .frame(height: 220)
+                .frame(height: 150)
                 .background(SovietPalette.steelDark)
                 .border(SovietPalette.black, width: 2)
         }
         .padding(14)
         .constructivistCard()
+    }
+
+    // MARK: 地图
+
+    @State private var cameraPosition: MapCameraPosition = .automatic
+    /// 默认纠偏：不纠的话轨迹会偏离底图几十~几百米
+    @State private var useGcj02 = true
+
+    private var trackMap: some View {
+        let coords = GeoTransform.coordinates(of: viewModel.points, gcj02: useGcj02)
+        return Map(position: $cameraPosition) {
+            if coords.count >= 2 {
+                MapPolyline(coordinates: coords)
+                    .stroke(SovietPalette.brass, lineWidth: 3)
+            }
+            if let first = coords.first {
+                Marker("起点", coordinate: first)
+                    .tint(SovietPalette.ok)
+            }
+            if let last = coords.last, coords.count >= 2 {
+                Marker("终点", coordinate: last)
+                    .tint(SovietPalette.redBright)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if coords.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "map")
+                        .font(.system(size: 22))
+                        .foregroundStyle(SovietPalette.textFaint)
+                    Text("该时间窗内无有效轨迹点")
+                        .font(.soviet(11))
+                        .foregroundStyle(SovietPalette.textMuted)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(SovietPalette.steelDark)
+            }
+        }
     }
 
     // MARK: 统计

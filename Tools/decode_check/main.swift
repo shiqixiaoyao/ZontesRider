@@ -198,8 +198,9 @@ struct DecodeCheck {
             report.expectEq(t.fuelPercent, 100, "油量")
             report.expectEq(t.rangeKm, 453, "续航")
             report.expectEq(t.odometerKm, 1289.0, "总里程")
-            report.expectEq(t.frontTireKpa, 93, "前胎压（服务端下发字符串 \"093\"）")
-            report.expectEq(t.rearTireKpa, 112, "后胎压")
+            // 胎压标定：服务端 "093"/"112" 单位是额定/区间单位的 1/2 → ×2 = 186 / 224
+            report.expectEq(t.frontTireKpa, 186, "前胎压（\"093\" ×2 标定）")
+            report.expectEq(t.rearTireKpa, 224, "后胎压（\"112\" ×2 标定）")
             report.expectEq(t.frontTireRated, 195, "前胎额定")
             report.expectEq(t.rearTireRated, 230, "后胎额定")
             // 服务端下发正常区间（前 155~255 / 后 190~290）—— 胎压告警的权威判据
@@ -207,7 +208,9 @@ struct DecodeCheck {
             report.expectEq(t.frontTireRangeHigh, 255, "前胎正常上限")
             report.expectEq(t.rearTireRangeLow, 190, "后胎正常下限")
             report.expectEq(t.rearTireRangeHigh, 290, "后胎正常上限")
-            report.expect(t.isFrontTireLow, "胎压告警用服务端区间（93 < 155）")
+            // 标定后 186/224 落在服务端区间内 → 不应误报「气压偏低」（这正是用户说的「不准」）
+            report.expect(!t.isFrontTireLow, "前胎压 186 在区间内，不误报偏低")
+            report.expect(!t.isRearTireLow, "后胎压 224 在区间内，不误报偏低")
             report.expect(t.frontTireRangeText == "155~255", "区间文本")
             report.expectEq(t.satelliteCount, 33, "卫星数")
             report.expectEq(t.tboxSignal, 5, "T-Box 信号")

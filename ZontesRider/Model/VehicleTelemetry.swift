@@ -92,6 +92,10 @@ public struct RawTelemetry: Decodable, Sendable {
     /// 摩托车的合理车速上限（km/h）：超过一律视为无效数据
     public static let maxPlausibleSpeed: Double = 400
 
+    /// 胎压标定系数：服务端 pressureFront/pressureRear 的单位是额定/区间单位的 1/2
+    ///（推导见 `VehicleTelemetry.init(raw:)` 里的注释）
+    public static let tirePressureScale = 2
+
     public static func sanitizeSpeed(_ v: Double?) -> Double? {
         guard let v, v >= 0, v <= maxPlausibleSpeed else { return nil }
         return speedSentinels.contains(v) ? nil : v
@@ -297,8 +301,14 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
             rangeKm: raw.range,
             odometerKm: raw.totalMileage,
             speedKmh: RawTelemetry.sanitizeSpeed(raw.speed),
-            frontTireKpa: raw.frontTire,
-            rearTireKpa: raw.rearTire,
+            // ⚠️ 胎压标定系数 ×2（2026-10-01 实测推断，用户连报两次「胎压不准」）
+            //   依据：实测 pressureFront/pressureRear 恒为额定值的 ~46%（090/195、108/230），
+            //   两轮同比例 → 系统性偏差而非真漏气；×2 后 = 180 / 216 kPa，
+            //   正好落在服务端正常区间（前 155~255、后 190~290）内，且为额定的 92~94%
+            //   —— 即正常胎压。说明服务端胎压字段的单位是额定/区间单位的 1/2。
+            //   若日后服务端改口径，只需改这里这一个系数。
+            frontTireKpa: raw.frontTire.map { $0 * RawTelemetry.tirePressureScale },
+            rearTireKpa: raw.rearTire.map { $0 * RawTelemetry.tirePressureScale },
             frontTireRated: raw.frontTireRate,
             rearTireRated: raw.rearTireRate,
             frontTireRangeLow: raw.frontTireRangeLow,
