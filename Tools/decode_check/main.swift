@@ -202,6 +202,13 @@ struct DecodeCheck {
             report.expectEq(t.rearTireKpa, 112, "后胎压")
             report.expectEq(t.frontTireRated, 195, "前胎额定")
             report.expectEq(t.rearTireRated, 230, "后胎额定")
+            // 服务端下发正常区间（前 155~255 / 后 190~290）—— 胎压告警的权威判据
+            report.expectEq(t.frontTireRangeLow, 155, "前胎正常下限")
+            report.expectEq(t.frontTireRangeHigh, 255, "前胎正常上限")
+            report.expectEq(t.rearTireRangeLow, 190, "后胎正常下限")
+            report.expectEq(t.rearTireRangeHigh, 290, "后胎正常上限")
+            report.expect(t.isFrontTireLow, "胎压告警用服务端区间（93 < 155）")
+            report.expect(t.frontTireRangeText == "155~255", "区间文本")
             report.expectEq(t.satelliteCount, 33, "卫星数")
             report.expectEq(t.tboxSignal, 5, "T-Box 信号")
             report.expect(t.lockState == .unlocked, "锁状态")

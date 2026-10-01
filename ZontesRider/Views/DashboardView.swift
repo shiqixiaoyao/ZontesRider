@@ -369,7 +369,9 @@ public struct DashboardView: View {
     }
 
     private var tireTint: Color {
-        (viewModel.telemetry.isFrontTireLow || viewModel.telemetry.isRearTireLow) ? SovietPalette.redBright : SovietPalette.brassPale
+        let t = viewModel.telemetry
+        let bad = t.isFrontTireLow || t.isRearTireLow || t.isFrontTireHigh || t.isRearTireHigh
+        return bad ? SovietPalette.redBright : SovietPalette.brassPale
     }
 
     // MARK: 控车

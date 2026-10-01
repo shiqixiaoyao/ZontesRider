@@ -69,6 +69,12 @@ public struct RawTelemetry: Decodable, Sendable {
     public let rearTire: Int?
     public let frontTireRate: Int?
     public let rearTireRate: Int?
+    /// 服务端下发的**正常区间**（实测 2026-10-01：前轮 155~255、后轮 190~290）
+    /// —— 这才是判断胎压是否异常的权威判据，比自己按「额定值的 80%」拍脑袋准得多
+    public let frontTireRangeLow: Int?
+    public let frontTireRangeHigh: Int?
+    public let rearTireRangeLow: Int?
+    public let rearTireRangeHigh: Int?
     public let satellite: Int?
     public let tboxSignal: Int?
     public let lockState: Int?
@@ -125,6 +131,10 @@ public struct RawTelemetry: Decodable, Sendable {
         rearTire    = int([.pressureRear, .pressurerear])
         frontTireRate = int([.ratedFrontPressure, .productsRatedFront, .frontRated])
         rearTireRate  = int([.ratedRearPressure, .productsRatedRear, .rearRated])
+        frontTireRangeLow  = int([.ratedFrontRangeLow])
+        frontTireRangeHigh = int([.ratedFrontRangeHeight])
+        rearTireRangeLow   = int([.ratedRearRangeLow])
+        rearTireRangeHigh  = int([.ratedRearRangeHeight])
         satellite   = int([.satelliteNum, .satellite])
         tboxSignal  = int([.gsmrssi, .gSMRSSI, .tboxSignal])
         lockState   = int([.lock, .Lock, .lockState])
@@ -149,6 +159,8 @@ public struct RawTelemetry: Decodable, Sendable {
         case pressureRear, pressurerear
         case ratedFrontPressure, productsRatedFront, frontRated
         case ratedRearPressure, productsRatedRear, rearRated
+        case ratedFrontRangeLow, ratedFrontRangeHeight
+        case ratedRearRangeLow, ratedRearRangeHeight
         case satelliteNum, satellite
         case gsmrssi, gSMRSSI, tboxSignal
         case lock, Lock, lockState
@@ -189,6 +201,11 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
     public var rearTireKpa: Int?
     public var frontTireRated: Int?
     public var rearTireRated: Int?
+    /// 服务端给的正常区间（前轮 155~255 / 后轮 190~290，实测单位与胎压值一致）
+    public var frontTireRangeLow: Int?
+    public var frontTireRangeHigh: Int?
+    public var rearTireRangeLow: Int?
+    public var rearTireRangeHigh: Int?
 
     public var satelliteCount: Int?
     public var tboxSignal: Int?
@@ -230,6 +247,10 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
         rearTireKpa: Int? = nil,
         frontTireRated: Int? = nil,
         rearTireRated: Int? = nil,
+        frontTireRangeLow: Int? = nil,
+        frontTireRangeHigh: Int? = nil,
+        rearTireRangeLow: Int? = nil,
+        rearTireRangeHigh: Int? = nil,
         satelliteCount: Int? = nil,
         tboxSignal: Int? = nil,
         lockState: LockState = .unknown,
@@ -251,6 +272,10 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
         self.rearTireKpa = rearTireKpa
         self.frontTireRated = frontTireRated
         self.rearTireRated = rearTireRated
+        self.frontTireRangeLow = frontTireRangeLow
+        self.frontTireRangeHigh = frontTireRangeHigh
+        self.rearTireRangeLow = rearTireRangeLow
+        self.rearTireRangeHigh = rearTireRangeHigh
         self.satelliteCount = satelliteCount
         self.tboxSignal = tboxSignal
         self.lockState = lockState
@@ -276,6 +301,10 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
             rearTireKpa: raw.rearTire,
             frontTireRated: raw.frontTireRate,
             rearTireRated: raw.rearTireRate,
+            frontTireRangeLow: raw.frontTireRangeLow,
+            frontTireRangeHigh: raw.frontTireRangeHigh,
+            rearTireRangeLow: raw.rearTireRangeLow,
+            rearTireRangeHigh: raw.rearTireRangeHigh,
             satelliteCount: raw.satellite,
             tboxSignal: raw.tboxSignal,
             lockState: raw.lockState.flatMap { LockState(rawValue: $0) } ?? .unknown,
@@ -298,15 +327,46 @@ public struct VehicleTelemetry: Codable, Sendable, Equatable {
     /// 油量低于 20% 提示
     public var isFuelLow: Bool { (fuelPercent ?? 100) < 20 }
 
-    /// 胎压低于额定值 80% 视为告警
+    /// 胎压异常判据：优先用**服务端下发的正常区间**（权威）；
+    /// 服务端没给区间时才回落到「低于额定值 80%」。
+    ///
+    /// 背景（2026-10-01 用户反馈「胎压不准」）：旧逻辑是自己拍的 额定×80%，
+    /// 而服务端明明同时下发了 `ratedFrontRangeLow/Height`（前轮 155~255）、
+    /// `ratedRearRangeLow/Height`（后轮 190~290）—— 用服务端区间才对得上官方 App。
     public var isFrontTireLow: Bool {
-        guard let a = frontTireKpa, let r = frontTireRated, r > 0 else { return false }
+        guard let a = frontTireKpa else { return false }
+        if let lo = frontTireRangeLow { return a < lo }
+        guard let r = frontTireRated, r > 0 else { return false }
         return Double(a) < Double(r) * 0.8
     }
 
     public var isRearTireLow: Bool {
-        guard let a = rearTireKpa, let r = rearTireRated, r > 0 else { return false }
+        guard let a = rearTireKpa else { return false }
+        if let lo = rearTireRangeLow { return a < lo }
+        guard let r = rearTireRated, r > 0 else { return false }
         return Double(a) < Double(r) * 0.8
+    }
+
+    /// 「胎压过高」也提示（区间给了上限就用上限）
+    public var isFrontTireHigh: Bool {
+        guard let a = frontTireKpa, let hi = frontTireRangeHigh else { return false }
+        return a > hi
+    }
+
+    public var isRearTireHigh: Bool {
+        guard let a = rearTireKpa, let hi = rearTireRangeHigh else { return false }
+        return a > hi
+    }
+
+    /// 正常区间文本，例如「155~255」，供 UI 显示参照（用户能自己判断准不准）
+    public var frontTireRangeText: String? {
+        guard let lo = frontTireRangeLow, let hi = frontTireRangeHigh else { return nil }
+        return "\(lo)~\(hi)"
+    }
+
+    public var rearTireRangeText: String? {
+        guard let lo = rearTireRangeLow, let hi = rearTireRangeHigh else { return nil }
+        return "\(lo)~\(hi)"
     }
 
     public var voltageRatio: Double {

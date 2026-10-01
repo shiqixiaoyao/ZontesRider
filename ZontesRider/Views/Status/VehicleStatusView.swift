@@ -227,16 +227,31 @@ public struct VehicleStatusView: View {
             SovietSectionLabel("胎压检测")
             HStack(spacing: 10) {
                 tireGauge("前轮", actual: t.frontTireKpa, rated: t.frontTireRated,
-                          low: t.isFrontTireLow)
+                          rangeText: t.frontTireRangeText,
+                          abnormal: t.isFrontTireLow || t.isFrontTireHigh,
+                          abnormalLabel: t.isFrontTireHigh ? "气压偏高" : "气压偏低")
                 tireGauge("后轮", actual: t.rearTireKpa, rated: t.rearTireRated,
-                          low: t.isRearTireLow)
+                          rangeText: t.rearTireRangeText,
+                          abnormal: t.isRearTireLow || t.isRearTireHigh,
+                          abnormalLabel: t.isRearTireHigh ? "气压偏高" : "气压偏低")
+            }
+            // 胎压来自 T-Box 上报，不是实时传感：把上报时间摆出来，
+            // 用户才能判断「是不是车还没上报新数据」，而不是以为 App 不准
+            if let at = t.updatedAt {
+                Text("车机上报于 \(Self.clock.string(from: at))，胎压随 T-Box 上报更新"
+                     + "（行驶中上报更频繁）")
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
         .constructivistCard(borderColor: SovietPalette.black)
     }
 
-    private func tireGauge(_ name: String, actual: Int?, rated: Int?, low: Bool) -> some View {
+    private func tireGauge(_ name: String, actual: Int?, rated: Int?,
+                           rangeText: String?, abnormal: Bool,
+                           abnormalLabel: String) -> some View {
         VStack(spacing: 6) {
             Text(name)
                 .font(.soviet(10))
@@ -244,12 +259,18 @@ public struct VehicleStatusView: View {
             Text(actual.map { String(format: "%03d", $0) } ?? "---")
                 .font(.soviet(22, weight: .bold))
                 .monospacedDigit()
-                .foregroundStyle(low ? SovietPalette.danger : SovietPalette.brass)
+                .foregroundStyle(abnormal ? SovietPalette.danger : SovietPalette.brass)
             Text("额定 \(rated.map { "\($0)" } ?? "--") kPa")
                 .font(.soviet(9))
                 .foregroundStyle(SovietPalette.textFaint)
-            if low {
-                Text("气压偏低")
+            // 把服务端给的正常区间摆出来：用户能自己核对「到底准不准」
+            if let rangeText {
+                Text("正常 \(rangeText)")
+                    .font(.soviet(9))
+                    .foregroundStyle(SovietPalette.textFaint)
+            }
+            if abnormal {
+                Text(abnormalLabel)
                     .font(.soviet(9))
                     .tracking(1)
                     .foregroundStyle(SovietPalette.castIron)
@@ -261,7 +282,7 @@ public struct VehicleStatusView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
         .background(SovietPalette.steelDark)
-        .border(low ? SovietPalette.danger : SovietPalette.black, width: 2)
+        .border(abnormal ? SovietPalette.danger : SovietPalette.black, width: 2)
     }
 
     private func signalCard(_ t: VehicleTelemetry) -> some View {
