@@ -30,6 +30,8 @@ public actor VehicleCommandChannel {
     private var listenerTask: Task<Void, Never>?
     private var pending: CheckedContinuation<FrameVerdict, Error>?
     private var buffer = ""
+    /// prime 的 ready ack 等待者（官方握手第一关，反汇编 Luk0）
+    private var readyAckWaiters: [CheckedContinuation<String?, Never>] = []
 
     public init(transport: any TransportProtocol, pkeCode: String) {
         self.transport = transport
@@ -85,6 +87,41 @@ public actor VehicleCommandChannel {
         }
     }
 
+    // MARK: - 握手观测（prime 的 ready ack）
+
+    /// 等车机对 prime 帧的 ready ack（官方 ≤1200ms）。
+    ///
+    /// 返回收到的应答原文，超时返回 nil —— **不抛错**：
+    /// 官方在没收到 ack 时也只是记一条 `"ready ack not received"` 然后继续。
+    /// 我们照做，但把结果**落盘**，这样在车上点一次就能判断
+    /// 「是连不上 / 是通道没被认 / 还是指令格式不对」。
+    public func awaitReadyAck() async -> String? {
+        startListeningIfNeeded()
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(BLETuning.readyAckTimeout))
+            await self?.timeoutReadyAck()
+        }
+        defer { watchdog.cancel() }
+        return await withCheckedContinuation { (c: CheckedContinuation<String?, Never>) in
+            readyAckWaiters.append(c)
+        }
+    }
+
+    private func timeoutReadyAck() {
+        guard !readyAckWaiters.isEmpty else { return }
+        let waiters = readyAckWaiters
+        readyAckWaiters.removeAll()
+        for w in waiters { w.resume(returning: nil) }
+    }
+
+    private func resolveReadyAck(with frame: String) {
+        guard !readyAckWaiters.isEmpty else { return }
+        let waiters = readyAckWaiters
+        readyAckWaiters.removeAll()
+        BLETrace.log("EVT", "ready ack: \(frame)")
+        for w in waiters { w.resume(returning: frame) }
+    }
+
     // MARK: - 收包循环
 
     private func startListeningIfNeeded() {
@@ -116,9 +153,20 @@ public actor VehicleCommandChannel {
 
     private func route(_ frame: String) {
         let verdict = FrameParser.verdict(of: frame)
+
+        // ① 先让 prime 的 ready ack 认领：它是握手的应答，不该被当成某条指令的 ACK
+        if !readyAckWaiters.isEmpty, FrameParser.isReadyAck(of: frame) {
+            resolveReadyAck(with: frame)
+            return
+        }
         if case .unsolicited(let t) = verdict {
             reportsContinuation.yield(t)
             return
+        }
+        // ② 观测点：无法归类的帧里若有「安全响应」token（第 5 段非空），记下来。
+        //    官方握手第 ④ 步就靠它，token 怎么用还没解出来，但**帧本身**是宝贵样本。
+        if verdict == .unrelated, let token = FrameParser.secureToken(of: frame) {
+            BLETrace.log("EVT", "secure token: \(token)")
         }
         guard let c = pending, verdict != .unrelated else { return }
         pending = nil

@@ -472,10 +472,15 @@ public actor BLETransport: TransportProtocol {
         c.resume(throwing: TransportError.cccdEnableTimeout)
     }
 
+    /// 写回调超时**不算失败**。
+    /// 官方做法（反汇编原文）：`"write callback missing after 900ms; continue"` —— 记一条然后继续，
+    /// 因为 onCharacteristicWrite / didWriteValueFor 在部分协议栈上本来就会漏回调。
+    /// 真正的失败会由随后等待 OK#/FAIL# 的超时如实报出来，所以这里不会造成「假成功」。
     private func timeoutWrite() {
         guard let c = writeContinuation else { return }
         writeContinuation = nil
-        c.resume(throwing: TransportError.writeTimeout)
+        BLETrace.log("EVT", "write callback missing after 900ms; continue")
+        c.resume()
     }
 
     private func timeoutPoweredOn() {

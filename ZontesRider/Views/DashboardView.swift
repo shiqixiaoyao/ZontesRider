@@ -419,7 +419,8 @@ public struct DashboardView: View {
             }
 
             Text("控车指令经蓝牙明文通道直发车机（需靠近车辆）。云端无 REST 控车端点，"
-                 + "官方签名帧体系未破解，故离线控车为唯一可行路径。")
+                 + "故离线控车为唯一可行路径。官方通道有握手：prime 帧 → 车机 ready ack → "
+                 + "参数写 → 安全响应。握手结果会记在下面的帧日志里。")
                 .font(.soviet(9))
                 .foregroundStyle(SovietPalette.textFaint)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -433,7 +434,7 @@ public struct DashboardView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "doc.text.magnifyingglass")
-                    Text(showBLETrace ? "收起蓝牙帧日志" : "查看蓝牙帧日志（校准用）")
+                    Text(showBLETrace ? "收起蓝牙帧日志" : "查看蓝牙帧日志（含握手，校准用）")
                         .font(.soviet(10))
                         .tracking(1)
                     Spacer()
@@ -446,7 +447,11 @@ public struct DashboardView: View {
             .buttonStyle(.plain)
 
             if showBLETrace {
-                Text(bleTrace.isEmpty ? "暂无蓝牙帧记录（先在上方点「连接车机」或发一条指令）" : bleTrace)
+                Text(bleTrace.isEmpty
+                     ? "暂无蓝牙帧记录（先在上方点「连接车机」或发一条指令）\n"
+                       + "要看的关键行：TX-PRIME（握手帧）、ready ack / ready ack not received（通道认没认）、"
+                       + "TX（指令帧）、RX（车机回帧）"
+                     : bleTrace)
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(SovietPalette.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)

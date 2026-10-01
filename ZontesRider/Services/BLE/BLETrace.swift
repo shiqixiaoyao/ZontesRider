@@ -31,8 +31,16 @@ public enum BLETrace {
             .appendingPathComponent(fileName)
     }
 
+    /// 落盘是「读全文→拼接→写回」，多并发域同时调会互相覆盖（车身帧一多就丢行）。
+    /// 全部收口到一条串行队列（同步执行，不会重入，不会死锁）。
+    private static let queue = DispatchQueue(label: "com.shiqixiaoyao.zontesrider.bletrace")
+
     /// 记一条。dir 用 TX（发出）/ RX（收到）/ EVT（链路事件）
     public static func log(_ dir: String, _ text: String) {
+        queue.sync { append(dir, text) }
+    }
+
+    private static func append(_ dir: String, _ text: String) {
         guard let url else { return }
         let flat = text
             .replacingOccurrences(of: "\r", with: "\\r")
@@ -49,12 +57,16 @@ public enum BLETrace {
     }
 
     public static func tail(limit: Int = 1600) -> String {
-        guard let url, let t = try? String(contentsOf: url, encoding: .utf8) else { return "" }
-        return t.count > limit ? String(t.suffix(limit)) : t
+        queue.sync {
+            guard let url, let t = try? String(contentsOf: url, encoding: .utf8) else { return "" }
+            return t.count > limit ? String(t.suffix(limit)) : t
+        }
     }
 
     public static func clear() {
-        guard let url else { return }
-        try? FileManager.default.removeItem(at: url)
+        queue.sync {
+            guard let url else { return }
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }

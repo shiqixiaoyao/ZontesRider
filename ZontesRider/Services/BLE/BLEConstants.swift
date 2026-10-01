@@ -12,7 +12,7 @@ public enum VehicleGATT {
     public static let cccd    = CBUUID(string: "00002902-0000-1000-8000-00805F9B34FB")
 }
 
-/// 时序参数：逐条来自 ShiRide 反汇编（Lxk0），不要凭感觉改
+/// 时序参数：逐条来自 ShiRide 反汇编（Lxk0 / Luk0 / Lvk0），不要凭感觉改
 public enum BLETuning {
     /// 服务发现超时（反编译：5s）
     public static let serviceDiscoveryTimeout: TimeInterval = 5
@@ -28,6 +28,40 @@ public enum BLETuning {
     public static let commandTimeout: TimeInterval = 6
     /// 断连后自动回连的退避序列
     public static let reconnectBackoff: [TimeInterval] = [1, 2, 4, 8, 15, 30]
+
+    // MARK: 控制通道握手时序（Luk0.a / Lvk0.a 反汇编实锤，2026-10-01 补挖）
+
+    /// prime 帧后等车机 ready ack（反编译：Luk0 里 1200ms 的 CountDownLatch await）
+    public static let readyAckTimeout: TimeInterval = 1.2
+    /// 等车机「安全响应」token（反编译：2800ms，超时文案「未收到车辆安全响应」）
+    public static let secureResponseTimeout: TimeInterval = 2.8
+    /// 等车机「蓝牙确认」（反编译：3000ms，超时文案「等待车辆蓝牙确认超时」）
+    public static let vehicleConfirmTimeout: TimeInterval = 3.0
+}
+
+// MARK: - 控制通道握手帧（Luk0.a 反汇编逐指令复刻）
+//
+// 官方控制通道不是「连上就能发指令」，而是一段握手：
+//   ① 发 prime 帧  `*BT,<pke>,10,001,7#`  → 车机回带 `7` 字段的 ready ack（≤1200ms）
+//   ② 发参数写     `AT+SET_PARAM=5,<v>\n`  → 车机回 SET_PARAM_OK / SET_PARAM_FAIL
+//   ③ 发氛围灯     `AT+SET_RGB=<v>\n`      → 车机回 RGBOK / RGBFAIL
+//   ④ 车机下发「安全响应」token（≤2800ms）→ 之后再回带同一 token 的帧 = 蓝牙确认
+//   ⑤ 读参数       `AT+READ_PARAM\n`       → 车机回 READ_PARAM
+// 只有走完这些，`*UClear,<pke>#` 这类指令才是"通道已认"状态下发出的。
+
+public enum ControlPrime {
+    /// 组帧：StringBuilder("*BT,") + pke + ",10,001,7#"（反汇编原文）
+    public static func frame(pkeCode: String) -> String {
+        "*BT,\(pkeCode),10,001,7#"
+    }
+}
+
+/// AT 参数通道。反汇编全库只有这三条（`AT+READ_PARAM` / `AT+SET_PARAM=5,` / `AT+SET_RGB=`），
+/// 且**都以换行结尾**（不是 `#`）——这是和明文指令帧最大的区别。
+public enum ATCommand {
+    public static let readParam = "AT+READ_PARAM\n"
+    public static func setParam5(_ value: String) -> String { "AT+SET_PARAM=5,\(value)\n" }
+    public static func setRGB(_ value: String) -> String { "AT+SET_RGB=\(value)\n" }
 }
 
 // MARK: - 明文指令表（Lmfa 反汇编实锤，9 个 case 的 Java hashCode 逐一验算过）
@@ -46,8 +80,10 @@ public enum PlaintextCommand: String, Sendable, CaseIterable {
     case untrack  = "*UChase"  // 取消追踪
     case diagnose = "*UKEY"    // 诊断
 
-    /// 组帧。⚠️ 载荷段格式待真车抓包终验——目前按响应语法对称构造。
-    /// 抓到 HCI 日志后只需改这一个方法。
+    /// 组帧 = 前缀 + 逗号 + pke + `#`（Lmfa.a 的 9 个前缀都**自带尾部逗号**，见 `PlaintextCommand`）。
+    /// ⚠️ 2026-10-01 反汇编补挖后的结论：帧本身没问题，
+    ///   之前「控车不灵」更可能卡在**通道握手**（prime → ready ack → 参数写 → 安全响应）没走完。
+    ///   真车日志到手后，若握手全绿而指令被拒，再回来动这个方法。
     public func frame(pkeCode: String, payload: String? = nil) -> String {
         if let payload, !payload.isEmpty {
             return "\(rawValue),\(pkeCode),\(payload)#"
@@ -66,21 +102,49 @@ public enum FrameVerdict: Sendable, Equatable {
 }
 
 public enum FrameParser {
+    /// 去帧尾 `#` 后按 `,` 分段（官方 Lmfa 也是这个预处理顺序）
+    public static func fields(of text: String) -> [String] {
+        text
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+            .components(separatedBy: ",")
+    }
+
     /// 按反汇编语法判定一帧：split(",") → 首段 "0#" 失败；尾段 ",OK#" 成功；"FAIL" 失败；*BR 主动上报
     public static func verdict(of text: String) -> FrameVerdict {
         if text.hasPrefix("*BR") { return .unsolicited(text) }
-        let fields = text
-            .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-            .components(separatedBy: ",")
-        if let first = fields.first, first == "0" || first == "0#" {
+        let parts = fields(of: text)
+        if let first = parts.first, first == "0" || first == "0#" {
             return .fail(reason: "车机返回失败帧（首段 0#）")
         }
         if text.contains("FAIL") {
             return .fail(reason: "车机返回 FAIL")
         }
         if text.hasSuffix(",OK#") || text.hasSuffix("OK#") {
-            return .ok(fields: fields)
+            return .ok(fields: parts)
         }
         return .unrelated
+    }
+
+    // MARK: 控制通道握手观测（反汇编推断，待真车日志确认）
+
+    /// 车机对 prime 帧的 ready ack。
+    /// 依据：Lxk0.n 里用 `Ljfa;->a("7", fields)` 判定、命中就 countDown 那个 1200ms 的 latch
+    /// —— prime 帧最后一个字段正是 `7`，车机把「我准备好了」回带在同一个字段里。
+    public static func isReadyAck(of text: String) -> Bool {
+        fields(of: text).contains("7")
+    }
+
+    /// 车机下发的「安全响应」token。
+    /// 依据：Lxk0.n 取**第 5 段**（index 4）→ trim → 大写 → 去 `#`，非空即视为 token
+    /// 并存入 AtomicReference（随后车机再回一帧带同一 token 的 = 蓝牙确认）。
+    /// ⚠️ 反汇编推断：token 的用途（是否要回签）尚未解出，这里只做**观测记录**，不据此放行。
+    public static func secureToken(of text: String) -> String? {
+        let f = fields(of: text)
+        guard f.count > 4 else { return nil }
+        let trimmed = f[4]
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+            .trimmingCharacters(in: .whitespaces)
+            .uppercased()
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

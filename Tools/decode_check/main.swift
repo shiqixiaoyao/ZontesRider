@@ -308,6 +308,74 @@ struct DecodeCheck {
         report.expect(FixtureProtocol.hitPaths.contains { $0.hasSuffix("/pkeapp/gx/pke/carData/getHomeData") },
                       "getHomeData 路径", FixtureProtocol.hitPaths.last ?? "?")
 
+        // ── 8. 蓝牙帧语法（控车协议，2026-10-01 反汇编补挖后钉死） ────
+        //
+        // 这一段拦的是「编译器拦不住、只能装到手机才发现」的协议类 bug：
+        // 帧前缀 / 握手帧 / 应答判定一旦被改错，App 在车上只会显示「车机无应答」，
+        // 而真实原因藏在帧格式里。这里把反汇编得出的**硬格式**写成断言。
+        section("蓝牙控车帧语法（Lmfa / Luk0 反汇编）")
+
+        // ① prime 握手帧：StringBuilder("*BT,") + pke + ",10,001,7#"
+        report.expectEq(ControlPrime.frame(pkeCode: "864918000000000"),
+                        "*BT,864918000000000,10,001,7#",
+                        "prime 帧格式")
+
+        // ② 明文指令帧：前缀带逗号，pke 后接 `#`
+        report.expectEq(PlaintextCommand.unlock.frame(pkeCode: "ABC"),
+                        "*UClear,ABC#", "解锁帧")
+        report.expectEq(PlaintextCommand.lock.frame(pkeCode: "ABC"),
+                        "*ULoc,ABC#", "上锁帧")
+        report.expectEq(PlaintextCommand.find.frame(pkeCode: "ABC"),
+                        "*UF,ABC#", "寻车帧")
+        report.expectEq(PlaintextCommand.freeze.frame(pkeCode: "ABC"),
+                        "*UFreeze,ABC#", "设防帧")
+        report.expectEq(PlaintextCommand.refresh.frame(pkeCode: "ABC"),
+                        "*RE,ABC#", "刷新帧")
+        // 9 条指令的前缀一个都不许改（Lmfa.a 的 9 个 case 逐一验算过 hashCode）
+        let prefixes = PlaintextCommand.allCases.map(\.rawValue)
+        report.expectEq(prefixes.count, 9, "指令表条数")
+        report.expect(prefixes.allSatisfy { $0.hasPrefix("*") && !$0.hasSuffix(",") },
+                      "前缀不带尾部逗号（组帧时自己加）", prefixes.joined(separator: " "))
+
+        // ③ AT 参数通道：**换行**结尾，不是 `#`（最容易搞混的一条）
+        report.expect(ATCommand.readParam.hasSuffix("\n") && !ATCommand.readParam.contains("#"),
+                      "AT 帧用换行结尾", ATCommand.readParam.debugDescription)
+        report.expectEq(ATCommand.setParam5("1"), "AT+SET_PARAM=5,1\n", "AT+SET_PARAM 组帧")
+        report.expectEq(ATCommand.setRGB("FF0000"), "AT+SET_RGB=FF0000\n", "AT+SET_RGB 组帧")
+
+        // ④ 应答判定：,OK# 成功；,FAIL# / 首段 0# 失败；*BR,1# 是主动上报不是应答
+        if case .ok = FrameParser.verdict(of: "*UClear,ABC,OK#") {
+            report.ok("应答 ,OK# → 成功")
+        } else {
+            report.fail("应答 ,OK# → 成功", "判定错成 \(FrameParser.verdict(of: "*UClear,ABC,OK#"))")
+        }
+        if case .fail = FrameParser.verdict(of: "*UClear,ABC,FAIL#") {
+            report.ok("应答 ,FAIL# → 失败")
+        } else {
+            report.fail("应答 ,FAIL# → 失败")
+        }
+        if case .fail = FrameParser.verdict(of: "0#,0#") {
+            report.ok("首段 0# → 失败")
+        } else {
+            report.fail("首段 0# → 失败")
+        }
+        if case .unsolicited = FrameParser.verdict(of: "*BR,1#") {
+            report.ok("主动上报 *BR,1# 不当作应答")
+        } else {
+            report.fail("主动上报 *BR,1# 不当作应答")
+        }
+        // 关键**反向**断言：普通指令应答绝不能被判成 ready ack，
+        // 否则「等 ready ack」会把指令的 ACK 吞掉，指令必然超时。
+        report.expect(!FrameParser.isReadyAck(of: "*UClear,ABC,OK#"),
+                      "指令 ACK 不会被误认成 ready ack")
+        report.expect(FrameParser.isReadyAck(of: "*BT,ABC,10,001,7#"),
+                      "带 7 字段的帧 = ready ack")
+        // 第 5 段非空才算「安全响应」token；短帧不许瞎报
+        let shortToken: String? = FrameParser.secureToken(of: "*BT,ABC,10,001,7#")
+        report.expect(shortToken == nil, "4 段帧没有 token", String(describing: shortToken))
+        report.expectEq(FrameParser.secureToken(of: "*BT,ABC,10,008,AB12CD#"), "AB12CD",
+                        "第 5 段 = token（大写去 #）")
+
         exit(report.summary())
     }
 }

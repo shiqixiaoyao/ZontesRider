@@ -33,14 +33,24 @@ public final class VehicleControlService: ControlCommandSending, @unchecked Send
     }
 
     /// 确保链路就绪：未就绪则走完整建链流程
-    /// （扫描 12s → 连接 10s → 服务/特征 5s → CCCD 3s → prime 帧 "*BT,<pke>,10,001,7#"）
+    /// （扫描 12s → 连接 10s → 服务/特征 5s → CCCD 3s → prime 帧 `*BT,<pke>,10,001,7#` → 等 ready ack 1.2s）
+    ///
+    /// ⚠️ 2026-10-01 反汇编补挖：官方控制通道**不是连上就能发指令**，
+    /// prime 之后还有一个 1200ms 的 ready ack 等待（Luk0 里的 CountDownLatch）。
+    /// 收不到也继续（官方同样继续，只记一条），但我们把它落盘——
+    /// 这是判断「车机认不认我们这条通道」的第一手证据。
     public func prepare() async throws {
         if await transport.currentState == .ready { return }
-        let prime = "*BT,\(pkeCode),10,001,7#"
+        let prime = ControlPrime.frame(pkeCode: pkeCode)
         await transport.setPrimeFrame(prime)
         // 观测点：握手帧同样落盘（校准时要看完整帧序列）
         BLETrace.log("TX-PRIME", prime)
         try await transport.connect()
+        if let ack = await channel.awaitReadyAck() {
+            BLETrace.log("EVT", "handshake ok（车机已认通道），ack=\(ack)")
+        } else {
+            BLETrace.log("EVT", "ready ack not received（\(BLETuning.readyAckTimeout)s）—— 通道可能没被认")
+        }
     }
 
     /// 发一条控车指令：先保证在线，再走明文指令表。

@@ -34,6 +34,7 @@ jobs:
             ZontesRider/Model/TrackPoint.swift \
             ZontesRider/Services/Net/IfinoAPI.swift \
             ZontesRider/Services/Store/LocalStore.swift \
+            ZontesRider/Services/BLE/BLEConstants.swift \
             Tools/decode_check/main.swift \
             -o build/decode_check
           ./build/decode_check Tools/decode_check/Fixtures
