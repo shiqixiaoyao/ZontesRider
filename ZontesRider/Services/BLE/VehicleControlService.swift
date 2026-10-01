@@ -158,8 +158,10 @@ public final class BLESession {
         switch event {
         case .stateChanged(let s):
             linkState = s
-            if case .failed(let r) = s { lastError = r }
-            if case .disconnected(let r) = s { lastError = r }
+            // 链路状态同样落盘：连不上时先看是「没扫到」还是「连了被踢」
+            BLETrace.log("EVT", "state=\(s)")
+            if case .failed(let r) = s { lastError = r; BLETrace.log("EVT", "failed: \(r)") }
+            if case .disconnected(let r) = s { lastError = r; BLETrace.log("EVT", "disconnected: \(r)") }
         case .rssiUpdated(let v):
             rssi = v
         case .received:
