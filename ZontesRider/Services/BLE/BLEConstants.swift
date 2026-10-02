@@ -29,6 +29,16 @@ public enum BLETuning {
     /// 断连后自动回连的退避序列
     public static let reconnectBackoff: [TimeInterval] = [1, 2, 4, 8, 15, 30]
 
+    // MARK: 扫描（两段式）
+
+    /// 阶段 1：按 NUS 服务 UUID 过滤扫（精准，快）
+    public static let scanPhase1Timeout: TimeInterval = 6
+    /// 阶段 2：不过滤全扫 + 逐个候选落盘再挑。
+    /// 依据：官方 Android 端（Lmk0）是靠**设备名 / 厂商数据 / 已记住的 MAC 地址**找车机的，
+    /// 重连更是直接 `ScanFilter.setDeviceAddress(...)` —— 说明车机广播里可能压根不带 NUS 服务 UUID。
+    /// iOS 拿不到 MAC，只能全扫后按广播内容 + 信号强度挑。
+    public static let scanPhase2Timeout: TimeInterval = 8
+
     // MARK: 控制通道握手时序（Luk0.a / Lvk0.a 反汇编实锤，2026-10-01 补挖）
 
     /// prime 帧后等车机 ready ack（反编译：Luk0 里 1200ms 的 CountDownLatch await）

@@ -19,11 +19,24 @@ final class PeripheralBox: @unchecked Sendable {
 ///    CoreBluetooth 的 CBCharacteristic / CBService / CBPeripheral / CBUUID 都是非 Sendable 的
 ///    ObjC 类，直接塞进 Sendable 枚举的关联值会被 Swift 6 语言模式判成 error。
 ///    做法：在代理这一层就把需要的字段（uuidString、value）取出来，再跨并发域传递。
+/// 一次扫描命中的候选（代理层就把需要的字段取成值类型，跨并发域安全）
+struct ScanCandidate: Sendable {
+    let name: String?
+    let serviceUUIDs: [String]
+    let rssi: Int
+}
+
+/// 候选 + 它的 peripheral 箱子（PeripheralBox 是 @unchecked Sendable）
+private struct ScanHit: Sendable {
+    let box: PeripheralBox
+    let candidate: ScanCandidate
+}
+
 enum CBEvent: Sendable {
     case poweredOn
     case poweredOff
     case unauthorized
-    case discovered(PeripheralBox)
+    case discovered(PeripheralBox, ScanCandidate)
     case connected
     case connectFailed(String)
     case disconnected(String?)
@@ -55,7 +68,18 @@ final class BLEDelegateProxy: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        handler?(.discovered(PeripheralBox(peripheral)))
+        // ⚠️ 只在代理层碰 CoreBluetooth 对象：把名字 / 服务 UUID / RSSI 都取成值类型再传。
+        //    广播里的服务 UUID 才是"这台设备是不是车机"的线索，必须一并带过去。
+        let name = peripheral.name
+            ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
+        let uuids = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?
+            .map { $0.uuidString } ?? []
+        let overflow = (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID])?
+            .map { $0.uuidString } ?? []
+        handler?(.discovered(
+            PeripheralBox(peripheral),
+            ScanCandidate(name: name, serviceUUIDs: uuids + overflow, rssi: RSSI.intValue)
+        ))
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -352,7 +376,15 @@ public actor BLETransport: TransportProtocol {
             failAllWaiters(TransportError.bluetoothUnauthorized)
             state = .failed("蓝牙权限被拒绝")
 
-        case .discovered(let box):
+        case .discovered(let box, let cand):
+            // 每个候选都落盘：这是判断"车机到底在不在广播里 / 广播里带什么"的唯一凭据
+            BLETrace.log("EVT", "discover: name=\(cand.name ?? "?") rssi=\(cand.rssi) "
+                         + "svc=[\(cand.serviceUUIDs.joined(separator: ","))]")
+            // 阶段 2 是"先攒够再挑"，不在这里直接认领
+            if collectContinuation != nil {
+                collectSink.append(ScanHit(box: box, candidate: cand))
+                return
+            }
             central.stopScan()
             if let c = discoveredContinuation {
                 discoveredContinuation = nil
@@ -436,6 +468,21 @@ public actor BLETransport: TransportProtocol {
         }
     }
 
+    // MARK: - 发现车机（两段式）
+
+    /// 阶段 2 的收集槽：`collectContinuation != nil` 时，发现的候选先攒着，最后统一挑。
+    private var collectSink: [ScanHit] = []
+    private var collectContinuation: CheckedContinuation<[ScanHit], Never>?
+
+    /// 找车机。两段式：
+    ///   **阶段 1**：按 NUS 服务 UUID 过滤扫（6s）—— 车机广播里带 NUS 时这一步就中。
+    ///   **阶段 2**：不过滤全扫（8s），看到的**每一个**候选都落盘，再按
+    ///              「广播里带 NUS 者优先 → 其次信号最强」挑一个。
+    ///
+    /// 为什么必须有阶段 2（2026-10-02 实测）：只按 UUID 过滤时 12s 扫不到车机；
+    /// 而反汇编显示官方 Android 端是靠**设备名 / 厂商数据**找车（重连才用 MAC 地址，
+    /// `ScanFilter.setDeviceAddress`）—— 说明车机广播里可能压根没有 NUS 服务 UUID。
+    /// iOS 拿不到 MAC，只能全扫后按广播内容和信号强度挑。
     private func findPeripheral() async throws -> CBPeripheral {
         // 已 retained 的直接复用
         if let p = peripheral, p.state == .connected || p.state == .connecting { return p }
@@ -443,16 +490,71 @@ public actor BLETransport: TransportProtocol {
         let connected = central.retrieveConnectedPeripherals(withServices: [VehicleGATT.service])
         if let p = connected.first { return p }
 
-        let watchdog = makeWatchdog(seconds: 12) { [weak self] in
+        BLETrace.log("EVT", "scan phase1: 按 NUS 服务 UUID 过滤（\(Int(BLETuning.scanPhase1Timeout))s）")
+        if let p = try? await scanOnce(services: [VehicleGATT.service],
+                                       timeout: BLETuning.scanPhase1Timeout) {
+            return p
+        }
+
+        BLETrace.log("EVT", "scan phase2: 不过滤全扫（\(Int(BLETuning.scanPhase2Timeout))s），候选逐个落盘")
+        let hits = await collectScan(timeout: BLETuning.scanPhase2Timeout)
+        BLETrace.log("EVT", "scan phase2: 共 \(hits.count) 个候选")
+        guard let best = pickBest(hits) else {
+            throw TransportError.peripheralNotFound(
+                timeout: BLETuning.scanPhase1Timeout + BLETuning.scanPhase2Timeout)
+        }
+        BLETrace.log("EVT", "scan phase2: 选中 name=\(best.candidate.name ?? "?") "
+                     + "rssi=\(best.candidate.rssi)")
+        return best.box.value
+    }
+
+    /// 扫到第一个命中就返回；超时抛 peripheralNotFound
+    private func scanOnce(services: [CBUUID]?, timeout: TimeInterval) async throws -> CBPeripheral {
+        let watchdog = makeWatchdog(seconds: timeout) { [weak self] in
             await self?.timeoutDiscover()
         }
         defer { watchdog.cancel() }
         return try await withCheckedThrowingContinuation { (c: CheckedContinuation<CBPeripheral, Error>) in
             discoveredContinuation = c
-            central.scanForPeripherals(withServices: [VehicleGATT.service], options: [
+            central.scanForPeripherals(withServices: services, options: [
                 CBCentralManagerScanOptionAllowDuplicatesKey: false,
             ])
         }
+    }
+
+    /// 攒够（或到点）后返回全部候选，超时**不抛错**
+    private func collectScan(timeout: TimeInterval) async -> [ScanHit] {
+        collectSink = []
+        let watchdog = makeWatchdog(seconds: timeout) { [weak self] in
+            await self?.finishCollect()
+        }
+        defer { watchdog.cancel() }
+        return await withCheckedContinuation { (c: CheckedContinuation<[ScanHit], Never>) in
+            collectContinuation = c
+            central.scanForPeripherals(withServices: nil, options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey: false,
+            ])
+        }
+    }
+
+    private func finishCollect() {
+        central.stopScan()
+        guard let c = collectContinuation else { return }
+        collectContinuation = nil
+        let hits = collectSink
+        collectSink = []
+        c.resume(returning: hits)
+    }
+
+    /// 挑候选：广播里带 NUS 服务的最可靠；都没有就取信号最强的
+    ///（站在车旁时，最强信号基本就是车机——这是阶段 2 的兜底判据）
+    private func pickBest(_ hits: [ScanHit]) -> ScanHit? {
+        let nus = VehicleGATT.service.uuidString
+        if let hit = hits.filter({ $0.candidate.serviceUUIDs.contains(nus) })
+                          .sorted(by: { $0.candidate.rssi > $1.candidate.rssi }).first {
+            return hit
+        }
+        return hits.sorted(by: { $0.candidate.rssi > $1.candidate.rssi }).first
     }
 
     /// 自动回连：退避序列 [1,2,4,8,15,30]，循环到成功或主动断开
