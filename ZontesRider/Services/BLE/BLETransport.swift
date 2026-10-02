@@ -247,9 +247,48 @@ public actor BLETransport: TransportProtocol {
 
         try await ensurePoweredOn()
 
-        // 1. 扫描（优先系统已连接列表，其次空口扫描，12s 超时）
+        // 1. 收集候选（已连接优先 → 扫描），然后**逐个试探**
+        //
+        // ⚠️ 为什么改成"逐个试探"（2026-10-02 实测）：用户报告"手机都已经连接到车机，
+        //    还扫描不出来"。iOS 上外设一旦**已连接，通常就不再广播**，扫描必然扫空；
+        //    必须从「系统已连接列表」里取。而原来那一步带了 NUS 服务过滤，
+        //    等于把车机又过滤掉了。正确做法是把所有来源的候选排个序，
+        //    挨个连上去做**服务发现验证**——谁真的有 NUS 服务，谁就是车机。
         state = .scanning
-        let target = try await findPeripheral()
+        let candidates = await gatherCandidates()
+        BLETrace.log("EVT", "候选 \(candidates.count) 个，逐个试探（没有 NUS 服务就换下一个）")
+
+        var lastError: Error = TransportError.peripheralNotFound(
+            timeout: BLETuning.scanPhase1Timeout + BLETuning.scanPhase2Timeout)
+
+        for cand in candidates {
+            let target = cand.box.value
+            BLETrace.log("EVT", "试探 name=\(cand.candidate.name ?? "?") rssi=\(cand.candidate.rssi)")
+            do {
+                try await establish(target)
+                state = .ready
+
+                // prime 帧（试探成功的这一台就是车机）
+                if let pf = primeFrame, let data = pf.data(using: .ascii) {
+                    try await write(data)
+                    try? await Task.sleep(for: .seconds(BLETuning.primeSettleDelay))
+                }
+                return
+            } catch {
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                BLETrace.log("EVT", "试探失败（换下一个）：\(reason)")
+                if error is CancellationError { throw error }
+                central.cancelPeripheralConnection(target)
+                lastError = error
+            }
+        }
+        central.stopScan()
+        throw lastError
+    }
+
+    /// 对单个候选走完「连接 → 服务 → 特征 → CCCD」，任一步失败就抛（由调用方换下一个）
+    private func establish(_ target: CBPeripheral) async throws {
+        clearPendingWaits()
 
         // 2. 连接（10s 超时）
         state = .connecting
@@ -304,13 +343,8 @@ public actor BLETransport: TransportProtocol {
             target.setNotifyValue(true, for: n)
         }
 
+        // prime 帧由调用方在**确认这台是车机之后**再发（见 performConnect 循环）
         state = .ready
-
-        // 6. prime 帧（反编译 §2.1：就绪后先发 "*BT,<pke>,10,001,7#"，再 sleep 20ms）
-        if let pf = primeFrame, let data = pf.data(using: .ascii) {
-            try await write(data)
-            try? await Task.sleep(for: .seconds(BLETuning.primeSettleDelay))
-        }
     }
 
     /// 建链握手帧。控车服务在建链前写入（*BT,<pkeCode>,10,001,7#）
@@ -483,29 +517,54 @@ public actor BLETransport: TransportProtocol {
     /// 而反汇编显示官方 Android 端是靠**设备名 / 厂商数据**找车（重连才用 MAC 地址，
     /// `ScanFilter.setDeviceAddress`）—— 说明车机广播里可能压根没有 NUS 服务 UUID。
     /// iOS 拿不到 MAC，只能全扫后按广播内容和信号强度挑。
-    private func findPeripheral() async throws -> CBPeripheral {
-        // 已 retained 的直接复用
-        if let p = peripheral, p.state == .connected || p.state == .connecting { return p }
-        // 系统层已连接的（其他 App 连着同一车机）
-        let connected = central.retrieveConnectedPeripherals(withServices: [VehicleGATT.service])
-        if let p = connected.first { return p }
+    /// 收集候选，**按命中概率排序**（已连接的最优先——车机被别的 App 连着时不再广播，
+    /// 扫描是扫不到的）：
+    ///   ① 自己之前连过的 → ② 系统已连接且带 NUS 服务 → ③ 系统已连接的全部
+    ///   → ④ 空口扫描（按 NUS 过滤）→ ⑤ 空口扫描（不过滤，按 RSSI）
+    private func gatherCandidates() async -> [ScanHit] {
+        var hits: [ScanHit] = []
+        var seen: Set<String> = []
 
+        func add(_ p: CBPeripheral, rssi: Int, tag: String) {
+            let id = p.identifier.uuidString
+            guard !seen.contains(id) else { return }
+            seen.insert(id)
+            BLETrace.log("EVT", "候选[\(tag)] name=\(p.name ?? "?") id=\(id.prefix(8))")
+            hits.append(ScanHit(box: PeripheralBox(p),
+                                candidate: ScanCandidate(name: p.name, serviceUUIDs: [], rssi: rssi)))
+        }
+
+        // ① 自己之前连过的
+        if let p = peripheral, p.state == .connected || p.state == .connecting {
+            add(p, rssi: 127, tag: "已保留")
+        }
+        // ② 系统已连接且带 NUS 服务（车机被官方 App 连着时走这条）
+        for p in central.retrieveConnectedPeripherals(withServices: [VehicleGATT.service]) {
+            add(p, rssi: 126, tag: "已连接·含NUS")
+        }
+        // ③ 系统已连接的全部（iOS 拿不到 MAC，只能全列出来逐个试探）
+        for p in central.retrieveConnectedPeripherals(withServices: []) {
+            add(p, rssi: 125, tag: "已连接")
+        }
+
+        // ④ 空口扫描：按 NUS 过滤
         BLETrace.log("EVT", "scan phase1: 按 NUS 服务 UUID 过滤（\(Int(BLETuning.scanPhase1Timeout))s）")
         if let p = try? await scanOnce(services: [VehicleGATT.service],
                                        timeout: BLETuning.scanPhase1Timeout) {
-            return p
+            add(p, rssi: 100, tag: "扫描·含NUS")
         }
 
-        BLETrace.log("EVT", "scan phase2: 不过滤全扫（\(Int(BLETuning.scanPhase2Timeout))s），候选逐个落盘")
-        let hits = await collectScan(timeout: BLETuning.scanPhase2Timeout)
-        BLETrace.log("EVT", "scan phase2: 共 \(hits.count) 个候选")
-        guard let best = pickBest(hits) else {
-            throw TransportError.peripheralNotFound(
-                timeout: BLETuning.scanPhase1Timeout + BLETuning.scanPhase2Timeout)
+        // ⑤ 空口扫描：不过滤，候选全部落盘
+        BLETrace.log("EVT", "scan phase2: 不过滤全扫（\(Int(BLETuning.scanPhase2Timeout))s）")
+        let scanned = await collectScan(timeout: BLETuning.scanPhase2Timeout)
+        let nus = VehicleGATT.service.uuidString
+        for h in scanned.sorted(by: { $0.candidate.rssi > $1.candidate.rssi }) {
+            // 广播里带 NUS 的排前面，其余按 RSSI
+            add(h.box.value,
+                rssi: h.candidate.serviceUUIDs.contains(nus) ? h.candidate.rssi + 1000 : h.candidate.rssi,
+                tag: h.candidate.serviceUUIDs.contains(nus) ? "扫描·含NUS" : "扫描")
         }
-        BLETrace.log("EVT", "scan phase2: 选中 name=\(best.candidate.name ?? "?") "
-                     + "rssi=\(best.candidate.rssi)")
-        return best.box.value
+        return hits
     }
 
     /// 扫到第一个命中就返回；超时抛 peripheralNotFound
@@ -546,17 +605,6 @@ public actor BLETransport: TransportProtocol {
         c.resume(returning: hits)
     }
 
-    /// 挑候选：广播里带 NUS 服务的最可靠；都没有就取信号最强的
-    ///（站在车旁时，最强信号基本就是车机——这是阶段 2 的兜底判据）
-    private func pickBest(_ hits: [ScanHit]) -> ScanHit? {
-        let nus = VehicleGATT.service.uuidString
-        if let hit = hits.filter({ $0.candidate.serviceUUIDs.contains(nus) })
-                          .sorted(by: { $0.candidate.rssi > $1.candidate.rssi }).first {
-            return hit
-        }
-        return hits.sorted(by: { $0.candidate.rssi > $1.candidate.rssi }).first
-    }
-
     /// 自动回连：退避序列 [1,2,4,8,15,30]，循环到成功或主动断开
     private func scheduleReconnect() {
         reconnectTask?.cancel()
@@ -581,6 +629,24 @@ public actor BLETransport: TransportProtocol {
     }
 
     private func setState(_ s: TransportState) { state = s }
+
+    /// 清掉上一次没走完的等待者（逐个试探时每个候选都可能是"上一个失败的那台"）。
+    /// 与 `failAllWaiters` 的区别：**不动 poweredOnWaiters**（电源等待是全局的，
+    /// 不能因为换了一个候选就把正在等蓝牙上电的调用一起抛掉）。
+    private func clearPendingWaits() {
+        discoveredContinuation?.resume(throwing: TransportError.notReady)
+        discoveredContinuation = nil
+        connectContinuation?.resume(throwing: TransportError.notReady)
+        connectContinuation = nil
+        servicesContinuation?.resume(throwing: TransportError.notReady)
+        servicesContinuation = nil
+        charsContinuation?.resume(throwing: TransportError.notReady)
+        charsContinuation = nil
+        cccdContinuation?.resume(throwing: TransportError.notReady)
+        cccdContinuation = nil
+        writeContinuation?.resume(throwing: TransportError.notReady)
+        writeContinuation = nil
+    }
 
     private func cleanupLink() {
         writeChar = nil

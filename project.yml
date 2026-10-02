@@ -19,8 +19,8 @@ targets:
         CFBundleDisplayName: 升仕车机
         # 版本号写死：XcodeGen 不会把 MARKETING_VERSION 自动写进 Info.plist，
         # 之前包内一直是 SDK 默认的 1.0/1，装完根本分不清装的是哪一版。
-        CFBundleShortVersionString: "0.2.18"
-        CFBundleVersion: "24"
+        CFBundleShortVersionString: "0.2.19"
+        CFBundleVersion: "25"
         # Xcode 的 iOS 模板里必有这两项，此前工程一直缺。
         # LSRequiresIPhoneOS 缺失会让包的"这是 iPhone 应用"身份不完整，
         # 部分装机工具/系统版本上会在启动校验阶段直接判死。
@@ -47,8 +47,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shiqixiaoyao.zontesrider
         SWIFT_VERSION: "5.0"
-        MARKETING_VERSION: "0.2.18"
-        CURRENT_PROJECT_VERSION: "24"
+        MARKETING_VERSION: "0.2.19"
+        CURRENT_PROJECT_VERSION: "25"
         TARGETED_DEVICE_FAMILY: "1,2"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         # 抗闪退关键：把 Swift 运行时随包带。
